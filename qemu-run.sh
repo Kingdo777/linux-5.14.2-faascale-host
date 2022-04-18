@@ -7,4 +7,5 @@ qemu-system-x86_64 \
   -device virtio-balloon \
   -initrd ramdisk.img \
   -m 1024 \
-  -s -S
+  --enable-kvm \
+  -cpu host

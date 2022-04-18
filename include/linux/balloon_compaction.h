@@ -7,6 +7,8 @@
  * Balloon page migration makes use of the general non-lru movable page
  * feature.
  *
+ * 这里的 non-lru 可能是指 page.lru 仅仅用于链表的链接，而无lru算法牵扯其中
+ *
  * page->private is used to reference the responsible balloon device.
  * page->mapping is used in context of non-lru page migration to reference
  * the address space operations for page isolation/migration/compaction.
@@ -51,6 +53,12 @@
  * have to cope for page compaction / migration, as well as it serves the
  * balloon driver as a page book-keeper for its registered balloon devices.
  */
+/**
+ * 这是实现气球的核心结构，扩展的气球页面存放在次结构中，当需要从气球中释放页面时，同样从此结构中获取
+ * 以上操作通过balloon_page_enqueue，balloon_page_dequeue实现，对应的实例是 virtio_balloon.vb_dev_info
+ * 此外，从伙伴系统申请页面通过balloon_page_alloc函数进行封装，此三个函数都在本balloon_compaction.c文件中定义
+ * 而归还页面调用的函数是put_page(), 这是mm.h中的函数
+ * */
 struct balloon_dev_info {
 	unsigned long isolated_pages;	/* # of isolated pages for migration */
 	spinlock_t pages_lock;		/* Protection to pages list */
@@ -96,9 +104,15 @@ extern int balloon_page_migrate(struct address_space *mapping,
  * Caller must ensure the page is locked and the spin_lock protecting balloon
  * pages list is held before inserting a page into the balloon device.
  */
+/**
+ *
+ * 在将页面插入气球设备之前，调用者必须确保页面被锁定，并且拿到了balloon_dev_info.pages_lock这个
+ * 用于保护balloon_dev_info.pages 列表的自旋锁
+ * */
 static inline void balloon_page_insert(struct balloon_dev_info *balloon,
 				       struct page *page)
 {
+	/// 将页面标记为“脱机”状态，即此page不应该被所有者 touche (read/write/dump/save)
 	__SetPageOffline(page);
 	__SetPageMovable(page, balloon->inode->i_mapping);
 	set_page_private(page, (unsigned long)balloon);
@@ -135,6 +149,8 @@ static inline struct balloon_dev_info *balloon_page_device(struct page *page)
 	return (struct balloon_dev_info *)page_private(page);
 }
 
+/// 根据https://www.kernel.org/doc/html/v5.14/core-api/memory-allocation.html
+/// 此标志的限制非常低，即不必是直接映射的内存区域，不必是不可移动的内存区域
 static inline gfp_t balloon_mapping_gfp_mask(void)
 {
 	return GFP_HIGHUSER_MOVABLE;

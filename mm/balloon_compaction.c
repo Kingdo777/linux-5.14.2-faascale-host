@@ -20,9 +20,13 @@ static void balloon_page_enqueue_one(struct balloon_dev_info *b_dev_info,
 	 * holding a reference to the 'page' at this point. If we are not, then
 	 * memory corruption is possible and we should stop execution.
 	 */
+	/// 我们在建立对page的引用时执行trylock_page，不过在此时该，page是没有任何人进行引用的，
+	/// 因此在理论上trylock_page一定会成功，否则内存可能是损坏的，应该停止执行
 	BUG_ON(!trylock_page(page));
+	/// 将page添加到balloon-list中，同时将page设置为private
 	balloon_page_insert(b_dev_info, page);
 	unlock_page(page);
+	/// 此函数记录执行 BALLOON_INFLATE 操作的次数，从而在vmstat中查看
 	__count_vm_event(BALLOON_INFLATE);
 }
 
@@ -37,6 +41,10 @@ static void balloon_page_enqueue_one(struct balloon_dev_info *b_dev_info,
  *
  * Return: number of pages that were enqueued.
  */
+ /**
+  * 调用balloon_page_enqueue_one将一个pages列表中所有的page，都添加到balloon-pages中
+  * 注意，要在操作之前给b_dev_info->pages_lock上锁
+  * */
 size_t balloon_page_list_enqueue(struct balloon_dev_info *b_dev_info,
 				 struct list_head *pages)
 {
@@ -73,6 +81,9 @@ EXPORT_SYMBOL_GPL(balloon_page_list_enqueue);
  *
  * Return: number of pages that were added to the @pages list.
  */
+ /**
+  * 从balloon-pages列表中，拿走n_req_pages个page还给系统，上面过程的反操作
+  * */
 size_t balloon_page_list_dequeue(struct balloon_dev_info *b_dev_info,
 				 struct list_head *pages, size_t n_req_pages)
 {
@@ -100,13 +111,14 @@ size_t balloon_page_list_dequeue(struct balloon_dev_info *b_dev_info,
 			continue;
 		}
 		balloon_page_delete(page);
+		/// 统计计数，BALLOON_DEFLATE操作加1
 		__count_vm_event(BALLOON_DEFLATE);
 		list_add(&page->lru, pages);
 		unlock_page(page);
 		n_pages++;
 	}
 	spin_unlock_irqrestore(&b_dev_info->pages_lock, flags);
-
+	/// 返回从balloon-pages中拿走的页面数
 	return n_pages;
 }
 EXPORT_SYMBOL_GPL(balloon_page_list_dequeue);
@@ -123,6 +135,8 @@ EXPORT_SYMBOL_GPL(balloon_page_list_dequeue);
  */
 struct page *balloon_page_alloc(void)
 {
+	/// __GFP_NORETRY 是在发生破坏性回收之前失败，不会导致OMM killer
+	/// GFP_NOWARN,具有合理的回退路径
 	struct page *page = alloc_page(balloon_mapping_gfp_mask() |
 				       __GFP_NOMEMALLOC | __GFP_NORETRY |
 				       __GFP_NOWARN);
@@ -143,6 +157,11 @@ EXPORT_SYMBOL_GPL(balloon_page_alloc);
  * a list with balloon_page_push before removing them with balloon_page_pop. To
  * enqueue a list of pages, use balloon_page_list_enqueue instead.
  */
+/**
+ * 这是 virtio-balloon调用的接口
+ * 如果page被balloon_page_push函数查到了list上，那么就不能再执行balloon_page_enqueue了，
+ * 而是应该先执行balloon_page_pop
+ * */
 void balloon_page_enqueue(struct balloon_dev_info *b_dev_info,
 			  struct page *page)
 {
@@ -174,6 +193,14 @@ EXPORT_SYMBOL_GPL(balloon_page_enqueue);
  *
  * Return: struct page for the dequeued page, or NULL if no page was dequeued.
  */
+
+/**
+ * 驱动程序必须调用此函数以正确地将先前加入到balloon-pages的页面出列，然后才能将其最终释放回客户系统。
+ * 调用者必须执行自己确保仅当某些页面实际被加入到balloon-pages时才调用此函数，即如果没有执行balloon_page_enqueue，那么不应该执行此函数。
+ * 请注意，即使有一些已入队的页面，此功能也可能无法使某些页面出队 - 因为由于the compaction of isolated pages，页面列表可能暂时为空。
+ * TODO：移除调用者计费要求，并允许调用者等待，直到所有页面都可以出列。
+ * */
+
 struct page *balloon_page_dequeue(struct balloon_dev_info *b_dev_info)
 {
 	unsigned long flags;

@@ -27,12 +27,26 @@
  * multiple balloon pages.  All memory counters in this driver are in balloon
  * page units.
  */
+/**
+ * 以下的理解是不正确的，是对大页的理解存在问题，并不是说采用大页，那么Page_Size就变了
+ * Page_size是4KB这个依然是不变的。=，这个属于非常底层的内核配置，大页也要在其基础之上
+ * */
+/**
+ * 内存气球的page大小是4KB，因此在内核中一个物理页可能对应于多个balloon-page，这是对于大页而言的，
+ * 默认内核中使用的page大小也是4KB，因此基本上一个balloon-page对应一个物理内存page。
+ * 因此在balloon设备驱动中存在很多页大小的转化代码，这都是为了处理大页的情况。
+ * 只需要记住balloon是以4KB为单位进行缩放的！
+ * */
+
+/// 每个物理页page，包含多少个balloon-page，默认是1
 #define VIRTIO_BALLOON_PAGES_PER_PAGE (unsigned)(PAGE_SIZE >> VIRTIO_BALLOON_PFN_SHIFT)
+/// 用于和virtio后端进行通讯的存放pfn的数组的大小，即每次传送256*4K=1MB大小的内存
 #define VIRTIO_BALLOON_ARRAY_PFNS_MAX 256
 /* Maximum number of (4k) pages to deflate on OOM notifications. */
 #define VIRTIO_BALLOON_OOM_NR_PAGES 256
 #define VIRTIO_BALLOON_OOM_NOTIFY_PRIORITY 80
 
+/// 向伙伴系统申请空闲页时，使用的falgs
 #define VIRTIO_BALLOON_FREE_PAGE_ALLOC_FLAG (__GFP_NORETRY | __GFP_NOWARN | \
 					     __GFP_NOMEMALLOC)
 /* The order of free page blocks to report to host */
@@ -142,6 +156,8 @@ static u32 page_to_balloon_pfn(struct page *page)
 	return pfn * VIRTIO_BALLOON_PAGES_PER_PAGE;
 }
 
+/// 一个回调函数，当hypervisor执行完缩放气球的操作后，会通知内核，而内核会调用该回调，从而唤醒阻塞在vb->acked
+/// 上的线程，即fill-balloon和leak-balloon操作
 static void balloon_ack(struct virtqueue *vq)
 {
 	struct virtio_balloon *vb = vq->vdev->priv;
@@ -149,8 +165,16 @@ static void balloon_ack(struct virtqueue *vq)
 	wake_up(&vb->acked);
 }
 
+/** 在扩展或缩小气球大小后，都要通知并等待hypervisor释放或者重新映射页面
+ * 当fill-balloon时，vq 是 inflate_vq，此时vb->pfns内容使我们刚刚从伙伴系统申请的，需要被释放的page，
+ * 页面发送到hypervisor后，将会取消对这些页面的映射(滞后执行)，然后这写页面就可以重分配给其他的VM了
+ *
+ * 相反，当leak-balloon时，vq 是 deflate_vq，此时vb->pfns是我们需要需要回收到伙伴系统的页面，此时hypervisor
+ * 需要为我们重新建立这写页面的映射
+*/
 static void tell_host(struct virtio_balloon *vb, struct virtqueue *vq)
 {
+	/// 包含地址和大小的一个数据结构
 	struct scatterlist sg;
 	unsigned int len;
 
@@ -161,6 +185,7 @@ static void tell_host(struct virtio_balloon *vb, struct virtqueue *vq)
 	virtqueue_kick(vq);
 
 	/* When host has read buffer, this completes via balloon_ack */
+	/// 阻塞等待，hypervisor返回，即等待balloon_ack函数的执行
 	wait_event(vb->acked, virtqueue_get_buf(vq, &len));
 
 }
@@ -213,13 +238,20 @@ static unsigned fill_balloon(struct virtio_balloon *vb, size_t num)
 	unsigned num_allocated_pages;
 	unsigned num_pfns;
 	struct page *page;
+	/// 申请的扩展到balloon的物理页page的组成的链表
 	LIST_HEAD(pages);
 
 	/* We can only do one array worth at a time. */
+	/// vb->pfns是记录本次扩缩操作那些物理页将被扩展到气球当中，数值即pfn，此数组的最大值是 VIRTIO_BALLOON_ARRAY_PFNS_MAX = 256
+	/// 也就是说每次最多缩放1MB大小的内存，因此这里的num就是本次扩展需要从伙伴系统拿走多少个balloon-page
 	num = min(num, ARRAY_SIZE(vb->pfns));
 
+	/// VIRTIO_BALLOON_PAGES_PER_PAGE 是每个物理page包含多少个balloon-page，因为balloon-page大小是4KB
+	/// 如果系统内存页采用大小，那么一个物理页将包含多个balloon-page，但是一般是物理页等于气球页都是4KB
 	for (num_pfns = 0; num_pfns < num;
 	     num_pfns += VIRTIO_BALLOON_PAGES_PER_PAGE) {
+		/// balloon_page_alloc 在mm/balloon_compaction.c中实现，这是kernel给实现balloon留下的接口，因为实现内存气球
+		/// 的技术有很多，比如xen-balloon，因此kernel留了统一的关于内存的申请和释放的接口
 		struct page *page = balloon_page_alloc();
 
 		if (!page) {
@@ -227,6 +259,7 @@ static unsigned fill_balloon(struct virtio_balloon *vb, size_t num)
 					     "Out of puff! Can't get %u pages\n",
 					     VIRTIO_BALLOON_PAGES_PER_PAGE);
 			/* Sleep for at least 1/5 of a second before retry. */
+			/// 注意，此代码是在workqueue中执行的，因此可以执行sleep
 			msleep(200);
 			break;
 		}
@@ -239,18 +272,24 @@ static unsigned fill_balloon(struct virtio_balloon *vb, size_t num)
 	vb->num_pfns = 0;
 
 	while ((page = balloon_page_pop(&pages))) {
+		/// vb->vb_dev_info 类型是 balloon_dev_info，同样在mm/balloon_compaction.h中定义，
+		/// 用于记录那些page被添加到了balloon中，balloon_page_enqueue 即入队操作
 		balloon_page_enqueue(&vb->vb_dev_info, page);
-
+		/// 将page写入vb->pfns数组，vb->num_pfns 暂作为数组索引
 		set_page_pfns(vb, vb->pfns + vb->num_pfns, page);
+		/// 记录气球的实际大小
 		vb->num_pages += VIRTIO_BALLOON_PAGES_PER_PAGE;
+		/// 这一步，应该修改可用内存的大小，即通过free调用查看到的可用内存数目
+		/// 最终修改的是全局变量 _totalram_pages
 		if (!virtio_has_feature(vb->vdev,
 					VIRTIO_BALLOON_F_DEFLATE_ON_OOM))
 			adjust_managed_page_count(page, -1);
 		vb->num_pfns += VIRTIO_BALLOON_PAGES_PER_PAGE;
 	}
-
+	/// 用于返回，实际扩展了多少page
 	num_allocated_pages = vb->num_pfns;
 	/* Did we get any? */
+	/// 通知hypervisor的后端驱动，回收我们收集到气球中的页面
 	if (vb->num_pfns != 0)
 		tell_host(vb, vb->inflate_vq);
 	mutex_unlock(&vb->balloon_lock);
@@ -266,8 +305,11 @@ static void release_pages_balloon(struct virtio_balloon *vb,
 	list_for_each_entry_safe(page, next, pages, lru) {
 		if (!virtio_has_feature(vb->vdev,
 					VIRTIO_BALLOON_F_DEFLATE_ON_OOM))
+			/// 增加全局变量 _totalram_pages 数目
 			adjust_managed_page_count(page, 1);
 		list_del(&page->lru);
+		/// 归还页面给伙伴系统，注意，这里的操作仅仅是减少一次引用，因为理论上被balloon拿到的page的
+		/// 引用大小是1，减少一次之后就变成了0，那么就会被自动回收，而不是直接调用伙伴系统
 		put_page(page); /* balloon reference */
 	}
 }
@@ -287,9 +329,11 @@ static unsigned leak_balloon(struct virtio_balloon *vb, size_t num)
 	num = min(num, (size_t)vb->num_pages);
 	for (vb->num_pfns = 0; vb->num_pfns < num;
 	     vb->num_pfns += VIRTIO_BALLOON_PAGES_PER_PAGE) {
+		/// 与前面fill-balloon操作相反，此时需要从vb_dev_info中获取要被回收给伙伴系统的page
 		page = balloon_page_dequeue(vb_dev_info);
 		if (!page)
 			break;
+		/// 将这写应该从气球释放的页面写入vb->pfns，和pages列表，前者用于和hypervisor通讯，后者用于归还给伙伴系统
 		set_page_pfns(vb, vb->pfns + vb->num_pfns, page);
 		list_add(&page->lru, &pages);
 		vb->num_pages -= VIRTIO_BALLOON_PAGES_PER_PAGE;
@@ -301,8 +345,10 @@ static unsigned leak_balloon(struct virtio_balloon *vb, size_t num)
 	 * virtio_has_feature(vdev, VIRTIO_BALLOON_F_MUST_TELL_HOST);
 	 * is true, we *have* to do it in this order
 	 */
+	/// 通知hypervisor重新建立映射
 	if (vb->num_pfns != 0)
 		tell_host(vb, vb->deflate_vq);
+	/// 回收页面给伙伴系统，同时增加 _totalram_pages，对应fill-balloon减小_totalram_pages的操作
 	release_pages_balloon(vb, &pages);
 	mutex_unlock(&vb->balloon_lock);
 	return num_freed_pages;
@@ -370,6 +416,7 @@ static unsigned int update_balloon_stats(struct virtio_balloon *vb)
 static void stats_request(struct virtqueue *vq)
 {
 	struct virtio_balloon *vb = vq->vdev->priv;
+	printk("stats_request\n");
 
 	spin_lock(&vb->stop_update_lock);
 	if (!vb->stop_update)
@@ -382,6 +429,7 @@ static void stats_handle_request(struct virtio_balloon *vb)
 	struct virtqueue *vq;
 	struct scatterlist sg;
 	unsigned int len, num_stats;
+	printk("stats_handle_request\n");
 
 	num_stats = update_balloon_stats(vb);
 
@@ -393,16 +441,30 @@ static void stats_handle_request(struct virtio_balloon *vb)
 	virtqueue_kick(vq);
 }
 
+/**
+ * 返回balloon需要缩放的数值
+ * 如，要气球缩小1MB(先`balloon 1023` -> 再`balloon 1024`),则target值为-256
+ * 如，要气球扩大1MB(初始内存为1024，然后执行`balloon 1023`)，则target为256
+ * */
 static inline s64 towards_target(struct virtio_balloon *vb)
 {
 	s64 target;
 	u32 num_pages;
 
+	/**
+	 * vb->vdev->config 类型是 virtio_config_ops
+	 * 以下操作为，调用virtio_config_ops中的get勾子函数来获取 virtio_balloon_config.num_pages
+	 * 然后将其赋值给num_pages，virtio_balloon_config.num_pages记录了每次请求hypervisor希望
+	 * 气球变成多大，是一个无符号整数
+	 * */
 	/* Legacy balloon config space is LE, unlike all other devices. */
 	virtio_cread_le(vb->vdev, struct virtio_balloon_config, num_pages,
 			&num_pages);
 
 	target = num_pages;
+	/**
+	 * vb->num_pages 记录的是气球当前的大小，当缩放完成后会修改此值，然后赋值给 virtio_balloon_config.actual
+	 * */
 	return target - vb->num_pages;
 }
 
@@ -440,20 +502,29 @@ static void virtio_balloon_queue_free_page_work(struct virtio_balloon *vb)
 	queue_work(vb->balloon_wq, &vb->report_free_page_work);
 }
 
+/**
+ * virtballoon_changed 是 balloon前端驱动 virtio_balloon_driver 结构中 config_changed的回调函数
+ * 即，当balloon的配置发生改变时将调用此函数，对应了baloon的fill和leak操作
+ * */
+
 static void virtballoon_changed(struct virtio_device *vdev)
 {
 	struct virtio_balloon *vb = vdev->priv;
 	unsigned long flags;
+	printk("virtballoon_changed\n");
 
 	spin_lock_irqsave(&vb->stop_update_lock, flags);
 	if (!vb->stop_update) {
+		/// balloon的size更新操作是由workqueue执行的，update_balloon_size_work在probe函数中初始化
+		/// update_balloon_size_work将调用update_balloon_size_func执行具体的修改过程
+		/// workqueue的使用使得整个过程是异步的，因此qemu在执行`balloon 1023`调节内存大小后会立即返回
 		queue_work(system_freezable_wq,
 			   &vb->update_balloon_size_work);
 		virtio_balloon_queue_free_page_work(vb);
 	}
 	spin_unlock_irqrestore(&vb->stop_update_lock, flags);
 }
-
+/// 修改virtio_balloon_config.actual的值，使之等于virtio_balloon_config.num_pages
 static void update_balloon_size(struct virtio_balloon *vb)
 {
 	u32 actual = vb->num_pages;
@@ -466,28 +537,36 @@ static void update_balloon_size(struct virtio_balloon *vb)
 static void update_balloon_stats_func(struct work_struct *work)
 {
 	struct virtio_balloon *vb;
+	printk("update_balloon_stats_func\n");
 
 	vb = container_of(work, struct virtio_balloon,
 			  update_balloon_stats_work);
 	stats_handle_request(vb);
 }
-
+/**
+ * fill/leak balloon的具体执行的函数，是workqueue update_balloon_size_work的入口函数
+ *
+ * */
 static void update_balloon_size_func(struct work_struct *work)
 {
 	struct virtio_balloon *vb;
 	s64 diff;
+	printk("update_balloon_size_func\n");
 
 	vb = container_of(work, struct virtio_balloon,
 			  update_balloon_size_work);
+	/// 获取要缩放气球的大小，整数表示扩大气球，负数表示缩小气球
+	/// 扩大气球等价于减少guest VM的可用内存
 	diff = towards_target(vb);
 
 	if (!diff)
 		return;
-
+	/// 根据diff的符号，选择指定的函数，需要注意，每次只能缩放1MB
 	if (diff > 0)
 		diff -= fill_balloon(vb, diff);
 	else
 		diff += leak_balloon(vb, -diff);
+	/// 修改virtio_balloon_config.actual的值，使之等于virtio_balloon_config.num_pages
 	update_balloon_size(vb);
 
 	if (diff)
@@ -719,6 +798,7 @@ static void report_free_page_func(struct work_struct *work)
 	struct virtio_balloon *vb = container_of(work, struct virtio_balloon,
 						 report_free_page_work);
 	u32 cmd_id_received;
+	printk("report_free_page_func\n");
 
 	cmd_id_received = virtio_balloon_cmd_id_received(vb);
 	if (cmd_id_received == VIRTIO_BALLOON_CMD_ID_DONE) {
@@ -1016,7 +1096,7 @@ static int virtballoon_probe(struct virtio_device *vdev)
 	}
 
 	virtio_device_ready(vdev);
-
+	printk("virtballoon_probe\n");
 	if (towards_target(vb))
 		virtballoon_changed(vdev);
 	return 0;
@@ -1109,7 +1189,7 @@ static int virtballoon_restore(struct virtio_device *vdev)
 {
 	struct virtio_balloon *vb = vdev->priv;
 	int ret;
-
+	printk("virtballoon_restore\n");
 	ret = init_vqs(vdev->priv);
 	if (ret)
 		return ret;

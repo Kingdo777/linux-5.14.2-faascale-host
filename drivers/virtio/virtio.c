@@ -134,7 +134,7 @@ static void __virtio_config_changed(struct virtio_device *dev)
 void virtio_config_changed(struct virtio_device *dev)
 {
 	unsigned long flags;
-
+	printk("virtio_config_changed\n");
 	spin_lock_irqsave(&dev->config_lock, flags);
 	__virtio_config_changed(dev);
 	spin_unlock_irqrestore(&dev->config_lock, flags);

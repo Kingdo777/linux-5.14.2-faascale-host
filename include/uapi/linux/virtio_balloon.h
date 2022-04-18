@@ -45,8 +45,17 @@
 #define VIRTIO_BALLOON_CMD_ID_DONE	1
 struct virtio_balloon_config {
 	/* Number of pages host wants Guest to give up. */
+	/// hypervisor 每次请求时，希望气球变成多大，此值是无符号的整数，其值由vm的初始内存和balloon
+	/// 给定的参数之差决定，如初始值是1024MB，若执行`balloon 1023` 则意味着需要缩小1MB的空间
+	/// 那么此值将被赋值为(1024-1023)*1024/4 = 256 个balloon-page
+	/// 如果再次执行`balloon 1024` 注意，此时num_pages的大小和上次的计算结果没任何关系，依然是仅仅和
+	/// 初始内存大小已经参数值相关，因此值为（1024-1024）*1024/4=0
 	__le32 num_pages;
 	/* Number of pages we've actually got in balloon. */
+	/// 气球的实际大小，在balloon根据num_pages进行缩放，完成之后，将会将该值调整为实际的balloon的大小
+	/// 因为可能在内存紧张的情况下，没办大扩大内存的大小
+	/// 按上面的是例子，第一次执行`balloon 1023`后，balloon的大小为256，再次执行`balloon 1024`后其值变为0
+	/// 此值完全等于 virtio_balloon->num_pages ，此值是通过virtio_balloon->num_pages进行赋值的
 	__le32 actual;
 	/*
 	 * Free page hint command id, readonly by guest.
