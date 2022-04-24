@@ -2597,6 +2597,12 @@ static void change_pageblock_range(struct page *pageblock_page,
  * is worse than movable allocations stealing from unmovable and reclaimable
  * pageblocks.
  */
+/**
+ * 最好偷窃整块的pageblock，这样可以有效的避免内存碎片
+ *
+ * 此外MIGRATE_RECLAIMABLE，MIGRATE_UNMOVABLE的申请总是通过的，理由不是很懂
+ *
+ * */
 static bool can_steal_fallback(unsigned int order, int start_mt)
 {
 	/*
@@ -2920,6 +2926,11 @@ __rmqueue_fallback(struct zone *zone, int order, int start_migratetype,
 	 * i.e. orders < pageblock_order. If there are no local zones free,
 	 * the zonelists will be reiterated without ALLOC_NOFRAGMENT.
 	 */
+	/**
+	 * ALLOC_NOFRAGMENT 标志是在，核心函数 __alloc_pages 中，使用 `alloc_flags |= alloc_flags_nofragment(ac.preferred_zoneref->zone, gfp);`
+	 * 定义的，目的是在偷取page时，最好是按pageblock偷取，避免同一个pageblock中包含各种不同迁移类型的page
+	 * 当然，如果当前内存紧张，会取消此标志重新申请一次
+	 * */
 	if (alloc_flags & ALLOC_NOFRAGMENT)
 		min_order = pageblock_order;
 
@@ -3692,12 +3703,16 @@ struct page *rmqueue(struct zone *preferred_zone,
 {
 	unsigned long flags;
 	struct page *page;
-
+	/// 如果，当前需要分配的页数很低，原来是单页，现在是小于8页，则从per-CPU 的list中获取
+	/// per-CPU是一种缓存技术，他会一次性获取一批次的page放在那，然后你用就返回给你，如果用完了
+	/// 就在申请一批次
 	if (likely(pcp_allowed_order(order))) {
 		/*
 		 * MIGRATE_MOVABLE pcplist could have the pages on CMA area and
 		 * we need to skip it when CMA area isn't allowed.
 		 */
+		/// CMA即，开启之后，将仅允许从CMA保留的区域分配可移动的页面
+		/// 默认Ubuntu中，没有开启此参数，因此此选项一直为真
 		if (!IS_ENABLED(CONFIG_CMA) || alloc_flags & ALLOC_CMA ||
 				migratetype != MIGRATE_MOVABLE) {
 			page = rmqueue_pcplist(preferred_zone, zone, order,
@@ -3721,6 +3736,7 @@ struct page *rmqueue(struct zone *preferred_zone,
 		 * reserved for high-order atomic allocation, so order-0
 		 * request should skip it.
 		 */
+		/// order !=0 && costly alloc(order > PAGE_ALLOC_COSTLY_ORDER)
 		if (order > 0 && alloc_flags & ALLOC_HARDER) {
 			page = __rmqueue_smallest(zone, order, MIGRATE_HIGHATOMIC);
 			if (page)
@@ -4064,6 +4080,12 @@ retry:
 	 */
 	no_fallback = alloc_flags & ALLOC_NOFRAGMENT;
 	z = ac->preferred_zoneref;
+	/// 遍历zonelist中的所有的zone，通过每个zone上的伙伴系统，寻找合适的page
+	/// zonelist是通过gfp_zonelist获取的，zone_list 包括了所有可选节点上的所有zone
+	/// 我们要从zone_index <= highest_zoneidx的zone中选择page
+	/// 如DMA的zone_index是0，DMA32是1，Normal是2
+	/// zonelist的排序是这样的： 2->1->0->2->1->0 ...
+	/// 每一个循环表示一个node，因此每次我们默认先从normal中拿page
 	for_next_zone_zonelist_nodemask(zone, z, ac->highest_zoneidx,
 					ac->nodemask) {
 		struct page *page;
@@ -4162,6 +4184,7 @@ retry:
 		}
 
 try_this_zone:
+		/// 伙伴系统的核心函数，在知乎有详细的分析：https://zhuanlan.zhihu.com/p/502525143
 		page = rmqueue(ac->preferred_zoneref->zone, zone, order,
 				gfp_mask, alloc_flags, ac->migratetype);
 		if (page) {
@@ -4170,6 +4193,13 @@ try_this_zone:
 			/*
 			 * If this is a high-order atomic allocation then check
 			 * if the pageblock should be reserved for the future
+			 */
+			/** 这段代码用于保留MIGRATE_HIGHATOMIC迁移类型的page，即每当遇到ALLOC_HARDER
+			 * 时，就将其成功申请的page放入MIGRATE_HIGHATOMIC中，下次再遇到ALLOC_HARDER
+			 * 依然优先保证从MIGRATE_HIGHATOMIC中分配，当然MIGRATE_HIGHATOMIC中预留的page是有限制的，
+			 * 值为zone大小的1/100，且至少是一个pageblock.
+			 * MIGRATE_HIGHATOMIC是不存为任何人后备list的，因此进入MIGRATE_HIGHATOMIC的page除非系统资源非常紧张,
+			 * 在慢路径中被回收，负责是不会动他的
 			 */
 			if (unlikely(order && (alloc_flags & ALLOC_HARDER)))
 				reserve_highatomic_pageblock(page, zone, order);
@@ -5181,6 +5211,11 @@ static inline bool prepare_alloc_pages(gfp_t gfp_mask, unsigned int order,
 	 * also used as the starting point for the zonelist iterator. It
 	 * may get reset for allocations that ignore memory policies.
 	 */
+	/**
+	 * preferred_zoneref是在进行内存分配时，首选的zone，其被定义为首选节点上第一个zone，在我的机器上就是Normal
+	 * 按理来说，Normal是最后一个，但是显然我们不能首先从DMA这16MB上去首先分配，因此在zonelist中，其实是反着排序的，
+	 * 也就是说，先检查Normal，再检查DMA32，再检查DMA，
+	 * */
 	ac->preferred_zoneref = first_zones_zonelist(ac->zonelist,
 					ac->highest_zoneidx, ac->nodemask);
 
@@ -5361,11 +5396,14 @@ struct page *__alloc_pages(gfp_t gfp, unsigned int order, int preferred_nid,
 	 * There are several places where we assume that the order value is sane
 	 * so bail out early if the request is out of bound.
 	 */
+	/// 伙伴系统最多一次分配4MB 大小的内存，(4KB * 2^10)
 	if (unlikely(order >= MAX_ORDER)) {
 		WARN_ON_ONCE(!(gfp & __GFP_NOWARN));
 		return NULL;
 	}
-
+	/// gfp_allowed_mask,数值上等于 GFP_BOOT_MASK 即：
+	/// (__GFP_BITS_MASK & ~(__GFP_RECLAIM|__GFP_IO|__GFP_FS))
+	/// 也就是说在BOOT阶段，一些flags是不允许使用的
 	gfp &= gfp_allowed_mask;
 	/*
 	 * Apply scoped allocation constraints. This is mainly about GFP_NOFS
@@ -5384,9 +5422,14 @@ struct page *__alloc_pages(gfp_t gfp, unsigned int order, int preferred_nid,
 	 * Forbid the first pass from falling back to types that fragment
 	 * memory until all local zones are considered.
 	 */
+	/**
+	 * 用于添加ALLOC_NOFRAGMENT标志，此标志指示，在执行__rmqueue_fallback从其他迁移类型的list
+	 * 中偷取page时，要按pageblock整块偷取，避免造成一个pageblock上混合多种迁移类型
+	 * */
 	alloc_flags |= alloc_flags_nofragment(ac.preferred_zoneref->zone, gfp);
 
 	/* First allocation attempt */
+	/// 遍历指定node中的zone，从伙伴系统中拿到一个空闲页
 	page = get_page_from_freelist(alloc_gfp, order, alloc_flags, &ac);
 	if (likely(page))
 		goto out;
@@ -7559,6 +7602,7 @@ static inline void pgdat_set_deferred_range(pg_data_t *pgdat)
 static inline void pgdat_set_deferred_range(pg_data_t *pgdat) {}
 #endif
 
+/// 负责初始化所有的node 会调用 free_area_init_core 初始化所有的zones
 static void __init free_area_init_node(int nid)
 {
 	pg_data_t *pgdat = NODE_DATA(nid);
@@ -7936,6 +7980,9 @@ bool __weak arch_has_descending_max_zone_pfns(void)
  * that arch_max_dma32_pfn has no pages. It is also assumed that a zone
  * starts where the previous one ended. For example, ZONE_DMA32 starts
  * at arch_max_dma_pfn.
+ *
+ * 遍历 系统中所有的node，然后调用 free_area_init_node 将其初始化
+ *
  */
 void __init free_area_init(unsigned long *max_zone_pfn)
 {

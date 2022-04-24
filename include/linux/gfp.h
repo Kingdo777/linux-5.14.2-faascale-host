@@ -61,6 +61,8 @@ struct vm_area_struct;
 #define ___GFP_NOLOCKDEP	0
 #endif
 /* If the above are modified, __GFP_BITS_SHIFT may need updating */
+/// __GFP_BITS_SHIFT 用于记录当前一共有多少个独立的GFP标志位，用于生成 __GFP_BITS_MASK ，因此需要手动指定
+/// GFP的个数，因此当以上的GFP标志发生变动时，需要调整__GFP_BITS_SHIFT
 
 /*
  * Physical address zone modifiers (see linux/mmzone.h - low four bits)
@@ -69,6 +71,10 @@ struct vm_area_struct;
  * without the underscores and use them consistently. The definitions here may
  * be used in bit comparisons.
  */
+/**
+ * 低四位用于指定申请内存所在的zone，每个zone都有自己的一个伙伴系统. 这四个称之为 `zone modifiers`.
+ * 这写标志可以用于位比较，但是不要单独的直接使用他们，而是使用不带下划线的标志，进行组合使用
+ * */
 #define __GFP_DMA	((__force gfp_t)___GFP_DMA)
 #define __GFP_HIGHMEM	((__force gfp_t)___GFP_HIGHMEM)
 #define __GFP_DMA32	((__force gfp_t)___GFP_DMA32)
@@ -102,6 +108,20 @@ struct vm_area_struct;
  *
  * %__GFP_ACCOUNT causes the allocation to be accounted to kmemcg.
  */
+/**
+  * 页面移动性和放置提示
+  *
+  * 这些标志提供有关页面移动性的提示。 具有相似移动性的页面被放置在相同的页面块中，
+  * 以最大限度地减少由于外部碎片引起的问题。
+  *
+  * %__GFP_MOVABLE (同时是一个zone标识符) 表示在内存压缩过程中可以通过页面迁移来移动该页面，也可以回收该页面。
+  * %__GFP_RECLAIMABLE 通过指定SLAB_RECLAIM_ACCOUNT用于slab的内存分配，被指定该标志的page可以被shrinkers回收
+  * %__GFP_WRITE 表示调用者可能会弄脏页面，在可能的情况下，将page分散在哥哥zone中，避免所有的脏页都在同一个zone(公平zone分配策略)
+  * %__GFP_HARDWALL 强制执行 cpuset 内存分配策略。
+  * %__GFP_THISNODE 强制从请求的节点满足分配，不执行fallback或放置策略。
+  * %__GFP_ACCOUNT 分配被计数到kmemcg中，即内存属于kernel-memory，属于mem-cgrup的内容
+  *
+  * */
 #define __GFP_RECLAIMABLE ((__force gfp_t)___GFP_RECLAIMABLE)
 #define __GFP_WRITE	((__force gfp_t)___GFP_WRITE)
 #define __GFP_HARDWALL   ((__force gfp_t)___GFP_HARDWALL)
@@ -135,6 +155,21 @@ struct vm_area_struct;
  * %__GFP_NOMEMALLOC is used to explicitly forbid access to emergency reserves.
  * This takes precedence over the %__GFP_MEMALLOC flag if both are set.
  */
+/**
+  * 水位标志符 ： 控制对于应急贮备内存的访问
+  *
+  * %__GFP_HIGH 表示调用是高优先级的，在系统可以make forward progress之前，批准请求是必要的。如创建I/O context 来清理回收page
+  *
+  * %__GFP_ATOMIC 表示调用者无法恢复或睡眠，且具有高优先级。用户通常是中断处理程序。这可能与%_GFP_HIGH一起使用
+  *
+  * %__GFP_MEMALLOC 允许访问所有内存。 这应该只在调用者保证分配之后将很快释放更多内存时使用，例如 进程退出或交换。
+  * 		    用户应该是 MM or co-ordinating closely with the VM (e.g. swap over NFS)。
+  * 		    此标志的用户必须非常小心，不要完全耗尽储备，并实施一种节流机制，根据释放的内存量控制储备的消耗。
+  * 		    在使用此标志之前，应始终考虑使用预分配池（例如 mempool）。
+  *
+  * %__GFP_NOMEMALLOC 用于明确禁止使用应急储备。如果同时设置了__GFP_MEMALLOC和__GFP_NOMEMALLOC，则前者失效
+  *
+  * */
 #define __GFP_ATOMIC	((__force gfp_t)___GFP_ATOMIC)
 #define __GFP_HIGH	((__force gfp_t)___GFP_HIGH)
 #define __GFP_MEMALLOC	((__force gfp_t)___GFP_MEMALLOC)
@@ -211,6 +246,46 @@ struct vm_area_struct;
  * loop around allocator.
  * Using this flag for costly allocations is _highly_ discouraged.
  */
+/**
+  * 回收标志符
+  * 首先以下所有标志，都仅仅适用于可阻塞(sleep)的内存分配，因此 %GFP_NOWAIT 和 %GFP_ATOMIC 将忽略它们
+  *
+  * %__GFP_IO 可以启动物理 IO。
+  *
+  * %__GFP_FS 可以向下调用 low-level FS。清除标志可以避免分配器递归到可能已经持有锁的文件系统中。
+  *
+  * %__GFP_DIRECT_RECLAIM 表示调用者可以进入直接回收。 当 fallback option 可用时，可以清除此标志以避免不必要的延迟。
+  *
+  * %__GFP_KSWAPD_RECLAIM 表示调用者希望在达到低水位线时唤醒 kswapd 并让它回收页面直到达到高水位线。
+  *                       当 fallback option 可并且回收可能会破坏系统时，调用者可能希望清除此标志。
+  *                       典型的例子是 THP(透明大页) 分配，其fallback很`便宜`，但回收/压缩可能会导致间接停顿。
+  *
+  * %__GFP_RECLAIM 是允许/禁止 DIRECT和 KSWAPD 回收的简写。即同时允许或禁止 %__GFP_DIRECT_RECLAIM和%__GFP_KSWAPD_RECLAIM
+  *
+  * 默认分配器行为会依赖于请求大小。
+  * 我们有一个所谓的高成本分配（order > %PAGE_ALLOC_COSTLY_ORDER）的概念。(PAGE_ALLOC_COSTLY_ORDER默认是3，即当一次申请页面超过8(>=16,n=4,5,6..)个page时，被认为高成本)
+  * !costly的分配(小page) 太重要而不能失败，因此默认情况下它们是隐式不失败的（有一些例外，比如 OOM `受害者`可能会失败，所以调用者仍然必须检查失败），
+  * 而代价高昂的请求即使不调用 OOM killer, 也会尝试尽量不造成破坏并后退。
+  *
+  * 以下三个修饰符可用于覆盖其中一些隐式规则:
+  *
+  * %__GFP_NORETRY：VM 实现只会尝试非常轻量级的内存直接回收，以在内存压力下获取一些内存（因此它可以休眠）。
+  * 		   它将避免像OOM杀手这样的破坏性行为。 调用者必须处理在沉重的内存压力下很可能发生的故障。
+  * 		   该标志适用于可以以较低成本轻松处理故障的情况，例如 reduced throughput
+  *
+  * %__GFP_RETRY_MAYFAIL：如果有迹象表明其他地方已经取得进展，VM 实现将重试先前失败的内存回收过程。
+  * 			 它可以等待其他任务尝试释放内存的高级方法，例如压缩（消除碎片）和分页。
+  * 			 重试次数仍有明确限制，但比 %__GFP_NORETRY 的限制更大。 使用此标志的分配可能会失败，
+  * 			 但只有在真正没有未使用的内存很少时才会失败。 虽然这些分配不会直接触发 OOM 杀手，
+  * 			 但它们的失败表明系统可能很快需要使用 OOM 杀手。 调用者必须处理失败，
+  * 			 但可以通过失败更高级别的请求或仅以效率低得多的方式完成它来合理地做到这一点。
+  * 			 如果分配确实失败，并且调用者能够释放一些非必要的内存，那么这样做可能会使整个系统受益。
+  *
+  * %__GFP_NOFAIL：VM 实现_必须_无限重试：被调用者无法处理分配失败。 分配可以无限期地阻塞，但永远不会返回失败。
+  *  		  测试失败是没有意义的。 应该仔细评估新用户（并且只有在没有合理的故障策略时才应该使用该标志），
+  *  		  但绝对最好使用该标志而不是围绕分配器开放代码无限循环。 _highly_ 不鼓励使用此标志进行昂贵的分配。
+  *
+  * */
 #define __GFP_IO	((__force gfp_t)___GFP_IO)
 #define __GFP_FS	((__force gfp_t)___GFP_FS)
 #define __GFP_DIRECT_RECLAIM	((__force gfp_t)___GFP_DIRECT_RECLAIM) /* Caller can reclaim */
@@ -239,6 +314,19 @@ struct vm_area_struct;
  * on deallocation. Typically used for userspace pages. Currently only has an
  * effect in HW tags mode.
  */
+/**
+  * action 修饰符
+  *
+  * %__GFP_NOWARN 抑制分配失败报告。
+  *
+  * %__GFP_COMP 地址复合页元数据。
+  *
+  * %__GFP_ZERO 成功时返回一个归零的页面。
+  *
+  *  %__GFP_ZEROTAGS 如果设置了 __GFP_ZERO，则 %__GFP_ZEROTAGS 在成功时返回一个内存标记为零的页面。
+  *
+  * %__GFP_SKIP_KASAN_POISON 返回一个不需要在释放时中毒的页面。 通常用于用户空间页面。 目前仅在 HW 标签模式下有效。
+  * */
 #define __GFP_NOWARN	((__force gfp_t)___GFP_NOWARN)
 #define __GFP_COMP	((__force gfp_t)___GFP_COMP)
 #define __GFP_ZERO	((__force gfp_t)___GFP_ZERO)
@@ -320,6 +408,35 @@ struct vm_area_struct;
  * version does not attempt reclaim/compaction at all and is by default used
  * in page fault path, while the non-light is used by khugepaged.
  */
+
+/**
+ * 可用的标志组合
+ * 常用的有用 GFP 标志组合。 建议子系统从这些组合之一开始，然后根据需要再设置/清除某些标志。
+ *
+ * %GFP_ATOMIC 调用者不能阻塞，需要分配成功。应用较低的水印以允许访问“原子储备”。 当前的实现不支持 NMI 和其他一些严格的非抢占式上下文（例如 raw_spin_lock）。这同样适用于 %GFP_NOWAIT。
+ *
+ * %GFP_KERNEL 是典型的内核内部分配。调用者需要 %ZONE_NORMAL 或更低的区域才能直接访问，但可以直接回收。
+ *
+ * %GFP_KERNEL_ACCOUNT 与 GFP_KERNEL 相同，只是分配计入 kmemcg。
+ *
+ * %GFP_NOWAIT 用于不应因直接回收、启动物理 IO 或使用任何文件系统回调而停止的内核分配。
+ *
+ * %GFP_NOIO 将使用直接回收来丢弃不需要启动任何物理 IO 的干净页面或平板页面。请尽量避免直接使用此标志，而是使用 memalloc_noio_{save,restore} 来标记无法执行任何 IO 的整个范围，并简要说明原因。所有分配请求都将隐式继承 GFP_NOIO。
+ *
+ * %GFP_NOFS 将使用直接回收但不会使用任何文件系统接口。请尽量避免直接使用此标志，而是使用 memalloc_nofs_{save,restore} 来标记不能/不应该递归到 FS 层的整个范围，并简要说明原因。所有分配请求都将隐式继承 GFP_NOFS。
+ *
+ * %GFP_USER 用于用户空间分配，也需要内核或硬件直接访问。它通常由硬件用于映射到硬件仍然必须 DMA 到的用户空间（例如图形）的缓冲区。对这些分配强制执行 cpuset 限制。
+ *
+ * %GFP_DMA 由于历史原因而存在，应尽可能避免。标志指示调用者要求使用最低区域（%ZONE_DMA 或 x86-64 上的 16M）。理想情况下，这将被删除，但需要仔细审核，因为一些用户确实需要它，而其他用户使用该标志来避免 %ZONE_DMA 中的低内存储备，并将最低区域视为一种紧急储备。
+ *
+ * %GFP_DMA32 与 %GFP_DMA 类似，只是调用者需要 32 位地址。
+ *
+ * %GFP_HIGHUSER 用于可以映射到用户空间的用户空间分配，不需要内核直接访问，但一旦使用就不能移动。一个示例可能是将数据直接映射到用户空间但没有寻址限制的硬件分配
+ *
+ * %GFP_HIGHUSER_MOVABLE 用于内核不需要直接访问但可以在需要访问时使用 kmap() 的用户空间分配。预计它们可以通过页面回收或页面迁移来移动。通常，LRU 上的页面也将使用 %GFP_HIGHUSER_MOVABLE 进行分配。
+ *
+ * %GFP_TRANSHUGE 和 %GFP_TRANSHUGE_LIGHT 用于 THP 分配。它们是复合分配，如果内存不可用，通常会很快失败，并且不会在失败时唤醒 kswapd/kcompactd。 _LIGHT 版本根本不尝试回收/压缩，默认情况下用于页面错误路径，而非轻版本由 khugepaged 使用。
+ * */
 #define GFP_ATOMIC	(__GFP_HIGH|__GFP_ATOMIC|__GFP_KSWAPD_RECLAIM)
 #define GFP_KERNEL	(__GFP_RECLAIM | __GFP_IO | __GFP_FS)
 #define GFP_KERNEL_ACCOUNT (GFP_KERNEL | __GFP_ACCOUNT)
@@ -434,6 +551,40 @@ static inline bool gfpflags_normal_context(const gfp_t gfp_flags)
  * GFP_ZONES_SHIFT must be <= 2 on 32 bit platforms.
  */
 
+/**
+ * GFP_ZONE_TABLE 是一个Word大小(2字节)的位串，用于在给定 gfp_t 的最低 4 位的情况下查找要使用的区域。
+ * 条目的长度为 GFP_ZONES_SHIFT 位，其中有 16 个涵盖 __GFP_DMA、__GFP_DMA32、__GFP_MOVABLE 和 __GFP_HIGHMEM 的所有可能组合。
+ * 即，根据zone标志符，决定从哪些zone中分配内存
+ *
+ * zone 的后背选项(fallback)循序是：
+ * MOVABLE=>HIGHMEM=>NORMAL=>DMA32=>DMA.
+ * 即当指定为HIGHMEM，但是内存不足时，则可以从NORMAL获取内存
+ *
+ * NORMAL 是指那些可以被内核直接通过直接映射的方式访问的内存(不需要通过页表转义，而是直接加一个偏移量)，在X86中，内核只有1G的虚拟地址空间，因此normal大概是800+MB
+ * 而剩下的物理内存则属于__GFP_HIGHMEM，但是在X86-64中，内核地址空间无敌大，有64TB，因此可以认为在x86_64中几乎所有的内存都是normal
+ *
+ * 在我的机器上，zone包括：
+ *
+ * DMA 0~16MB
+ * DMA32 16MB~4GB
+ * Normal 4GB 以上所有
+ * Movable 虚拟区域
+ * Device 虚拟区域
+ *
+ * GFP_MOVABLE 不仅是一个区域说明符，还是一个分配策略。 因此必须是 __GFP_MOVABLE 加上另一个区域选择器是有效的。
+ * 最低 3 位（DMA、DMA32、HIGHMEM）中只有 1 位可以设置为“1”。
+ * 说白了NORMAL是一直可以用的，normal是可以被内核直接映射使用的内存，在
+ * 0000      	None        			NORMAL
+ * 0001		__GFP_DMA			DMA / NORMAL
+ * 0010		__GFP_HIGHMEM			HIGHMEM / NORMAL
+ * 0100		__GFP_DMA32			DMA32 / NORMAL
+ *
+ * 1000      	__GFP_MOVABLE 			NORMAL
+ * 1001		__GFP_MOVABLE & __GFP_DMA	DMA / NORMAL
+ * 1010		__GFP_MOVABLE & __GFP_HIGHMEM	HIGHMEM / NORMAL
+ * 1100		__GFP_MOVABLE & __GFP_DMA32	DMA32 / NORMAL
+ * */
+
 #if defined(CONFIG_ZONE_DEVICE) && (MAX_NR_ZONES-1) <= 4
 /* ZONE_DEVICE is not a valid GFP zone specifier */
 #define GFP_ZONES_SHIFT 2
@@ -490,7 +641,14 @@ static inline enum zone_type gfp_zone(gfp_t flags)
  * can allocate highmem pages, the *get*page*() variants return
  * virtual kernel addresses to the allocated page(s).
  */
-
+/**
+ * 选择node的zonelist，每个zone都有1个(UMA)或2个(NUMA) zonelist，
+ * 其中一个zonelist仅仅包括了该node所有的zone即ZONELIST_NOFALLBACK；
+ * 而另一个zonelist，还包括了其后备节点(fillback)上的所有的zone
+ *
+ * 如果在分配page时指定了__GFP_THISNODE，即表示，仅仅从本节节点上分配，则函数返回ZONELIST_NOFALLBACK
+ * 否则返回ZONELIST_FALLBACK，这是目前唯一的需求，但是需要注意，UMA仅仅有的list也是ZONELIST_FALLBACK
+ * */
 static inline int gfp_zonelist(gfp_t flags)
 {
 #ifdef CONFIG_NUMA

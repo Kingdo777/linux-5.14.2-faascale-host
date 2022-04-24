@@ -137,10 +137,24 @@ extern bool cgroup_memory_nokmem;
  * in __alloc_pages_slowpath(). All other functions pass the whole structure
  * by a const pointer.
  */
+/**
+ * 用于在page分配所涉及的 alloc_pages*系列的函数之间传递大部分的不可变的参数
+ *
+ * nodemask, migratetype and highest_zoneidx 仅仅在调用__alloc_pages()时初始化一次，之后便不在改变
+ *
+ * zonelist, preferred_zone and highest_zoneidx 会在__alloc_pages()的快速路径被设置一次，如果快速路径
+ * 失败，那么可能会在慢路径中被修改。所有的函数的传递此结构均通过一个const类型的指针
+ * */
 struct alloc_context {
+	/// 指向用于分配页面的区域列表；
 	struct zonelist *zonelist;
+	/// 指定内存分配的Node，如果没有指定，则在所有节点中进行分配；
 	nodemask_t *nodemask;
+	/// 指定要在快速路径中首先分配的区域，在慢路径中指定了zonelist中的第一个可用区域
 	struct zoneref *preferred_zoneref;
+	/// 迁移类型，在伙伴系统中，同一order拥有一个大链表，即zone中的free_area，而
+	/// free_area其实是一个数组，每个数组元素是一个链表，代表一种迁移类型
+	/// 迁移指的是在不同NUMA节点上进行迁移
 	int migratetype;
 
 	/*
@@ -153,7 +167,13 @@ struct alloc_context {
 	 * the target zone since higher zone than this index cannot be
 	 * usable for this allocation request.
 	 */
+	/**
+	 * highest_zoneidx 表示page分配的最高可用zone，在我x86-64的机器上，其顺序是：
+	 * Normal 》 DMA32 》 DMA
+	 * 即，如果最高可用zone是Normal，那么如果Normal内存不足，则依然可用DMA32和DMA，以此类推
+	 * */
 	enum zone_type highest_zoneidx;
+	/// 指定是否进行脏页的传播；
 	bool spread_dirty_pages;
 };
 
@@ -582,7 +602,17 @@ unsigned int reclaim_clean_pages_from_list(struct zone *zone,
 #else
 #define ALLOC_OOM		ALLOC_NO_WATERMARKS
 #endif
-
+/**
+ * ALLOC_WMARK_MIN：仅在最小水位water mark及以上限制页面分配；
+ * ALLOC_WMARK_LOW：仅在低水位water mark及以上限制页面分配；
+ * ALLOC_WMARK_HIGH：仅在高水位water mark及以上限制页面分配；
+ * ALLOC_NO_WATERMARKS: 页面分配时不检查水位
+ * ALLOC_HARDER: 尽力分配，一般在gfp_mask设置了__GFP_ATOMIC时会使用。如果页面分配失败，则尽可能分配MIGRATE_HIGHATOMIC类型的空闲页面。
+ * ALLOC_HIGH：高优先级分配，一般在gfp_mask设置了__GFP_HIGH时使用
+ * ALLOC_CPUSET：检查是否为正确的cpuset；
+ * ALLOC_CMA： 允许从CMA区域进行分配
+ * ALLOC_KSWAPD: 内存不足时唤醒kswapd内核线程
+ * */
 #define ALLOC_HARDER		 0x10 /* try to alloc harder */
 #define ALLOC_HIGH		 0x20 /* __GFP_HIGH set */
 #define ALLOC_CPUSET		 0x40 /* check for correct cpuset */

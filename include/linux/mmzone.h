@@ -39,6 +39,15 @@
  */
 #define PAGE_ALLOC_COSTLY_ORDER 3
 
+/**
+ * MIGRATE_UNMOVABLE	不可移动, 核心内核分配的大部分页面都属于这一类。
+ * MIGRATE_MOVABLE	可移动，属于用户空间应用程序的页属于此类页面，它们是通过页表映射的，因此我们只需要更新页表项，并把数据复制到新位置就可以了，当然要注意，一个页面可能被多个进程共享，对应着多个页表项
+ * MIGRATE_RECLAIMABLE	可回收,不能直接移动，但是可以回收，因为还可以从某些源重建页面，比如映射文件的数据属于这种类别，kswapd会按照一定的规则，周期性的回收这类页面。
+ * MIGRATE_PCPTYPES	用来表示每CPU页框高速缓存的数据结构中的链表的迁移类型数目。
+ * MIGRATE_HIGHATOMIC	某些情况，内核需要分配一个高阶的页面块而不能休眠.如果向具有特定可移动性的列表请求分配内存失败，这种紧急情况下可从MIGRATE_HIGHATOMIC中分配内存
+ * MIGRATE_CMA		预留一段的内存给驱动使用，但当驱动不用的时候，伙伴系统可以分配给用户进程用作匿名内存或者页缓存。而当驱动需要使用时，就将进程占用的内存通过回收或者迁移的方式将之前占用的预留内存腾出来，供驱动使用。
+ * MIGRATE_ISOLATE	不能从这个链表分配页框，因为这个链表专门用于NUMA结点移动物理内存页，将物理内存页内容移动到使用这个页最频繁的CPU
+ * */
 enum migratetype {
 	MIGRATE_UNMOVABLE,
 	MIGRATE_MOVABLE,
