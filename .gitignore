@@ -165,3 +165,6 @@ sphinx_*/
 /build/
 /cmake-build-debug/
 ramdisk.img
+rootfs_debian_x86_64*
+*.ext4
+*.qcow2
