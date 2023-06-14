@@ -83,6 +83,8 @@ update_rootfs() {
 #    iptables -t nat -A POSTROUTING -o ens8f0 -j MASQUERADE
 #    iptables -A FORWARD -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
 #    iptables -A FORWARD -i tap0 -o ens8f0 -j ACCEPT
+#    iptables -A FORWARD -i ens8f0 -j ACCEPT
+#    iptables -A PREROUTING -i ens8f0 -p tcp --dport 8080 -j DNAT --to-destination 172.16.0.2
 #    sleep 0.5s
 #    exit 0
 #else
@@ -104,18 +106,21 @@ update_rootfs() {
 
 run_qemu() {
   # How to share Dir: https://www.linux-kvm.org/page/9p_virtio
-  /home/kingdo/CLionProjects/qemu_6_1_0/build/qemu-system-x86_64 \
+  /home/kingdo/CLionProjects/qemu/build/qemu-system-x86_64 \
     -nographic -kernel arch/x86/boot/bzImage \
     -append "noinintrd console=ttyS0 root=/dev/vda rootfstype=ext4 rw loglevel=8 nokaslr" \
     -device virtio-balloon \
     -drive if=none,file=rootfs.ext4,id=hd0,format=raw -device virtio-blk-pci,drive=hd0 \
-    -fsdev local,security_model=passthrough,id=fsdev0,path=/home/kingdo/GolandProjects -device virtio-9p-pci,id=fs0,fsdev=fsdev0,mount_tag=go_project \
-    -fsdev local,security_model=passthrough,id=fsdev1,path=/home/kingdo/GolandProjects -device virtio-9p-pci,id=fs1,fsdev=fsdev1,mount_tag=python_project \
     -nic tap,ifname=tap0,model=virtio-net-pci \
-    -nic user,hostfwd=tcp::8080-:8080 \
-    -qmp unix:qmp.sock,server=on,wait=off \
     $QEMU_ARGS
 
+  #  -fsdev local,security_model=passthrough,id=fsdev0,path=/home/kingdo/GolandProjects -device virtio-9p-pci,id=fs0,fsdev=fsdev0,mount_tag=go_project \
+  #  -fsdev local,security_model=passthrough,id=fsdev1,path=/home/kingdo/GolandProjects -device virtio-9p-pci,id=fs1,fsdev=fsdev1,mount_tag=python_project \
+  #  -nic tap,ifname=tap0,model=virtio-net-pci \
+  #  -nic user,hostfwd=tcp::8080-:8080 \
+
+  # -nic user,model=virtio-net-pci \
+  # -nic user,hostfwd=tcp::8080-:8080 \
   # hostfwd=[tcp|udp]:[hostaddr]:hostport-[guestaddr]:guestport
 }
 
@@ -133,12 +138,48 @@ update_rootfs)
 run)
   check_img
   check_root
-  QEMU_ARGS="-m 1024 -smp 1 --enable-kvm -cpu host"
+  #    QEMU_ARGS="-m 8G -smp 4 --enable-kvm -cpu host"
+
+  # Use qmp.sock
+#    QEMU_ARGS=$(
+#      cat <<EOF
+#        -qmp unix:qmp.sock,server=on,wait=off
+#        -m 8G -smp 4 --enable-kvm -cpu host
+#EOF
+#    )
+
+  # Enable virtio-mem
+#  QEMU_ARGS=$(
+#    cat <<EOF
+#        -m 256M,maxmem=8448M
+#        -smp 4 --enable-kvm -cpu host
+#        -device virtio-balloon \
+#        -object memory-backend-ram,id=vmem0,size=8G,prealloc=off
+#        -device virtio-mem-pci,id=vm0,memdev=vmem0,node=0,requested-size=0,block-size=4M,prealloc=on
+#        -qmp unix:qmp.sock,server=on,wait=off
+#EOF
+#  )
+  # NUMA
+    QEMU_ARGS=$(
+      cat <<EOF
+          -m 4160M,maxmem=12352M
+          -smp sockets=2,cores=2
+          --enable-kvm -cpu host
+          -object memory-backend-ram,id=mem0,size=64M
+          -object memory-backend-ram,id=mem1,size=4G
+          -numa node,nodeid=0,cpus=0-1,memdev=mem0
+          -numa node,nodeid=1,cpus=2-3,memdev=mem1
+          -object memory-backend-ram,id=vmem0,size=8G,prealloc=off
+          -device virtio-mem-pci,id=vm0,memdev=vmem0,node=0,requested-size=4M,prealloc=off
+          -qmp unix:qmp.sock,server=on,wait=off
+EOF
+    )
   run_qemu
   ;;
 
 debug)
   check_img
+  check_root
   echo "Enable qemu debug server"
   QEMU_ARGS="-m 1024 -s -S"
   run_qemu
