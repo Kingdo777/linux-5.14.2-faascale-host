@@ -827,10 +827,12 @@ static void __init mm_init(void)
 	kfence_alloc_pool();
 	report_meminit();
 	stack_depot_init();
+	/// 特定于体系结构的函数，用于停用bootmem分配器，并迁移到实际的内存管理函数(也就是伙伴系统)
 	mem_init();
 	mem_init_print_info();
 	/* page_owner must be initialized after buddy is ready */
 	page_ext_init_flatmem_late();
+	/// 初始化内核内部用于小块内存区的分配器，也就是slab分配器
 	kmem_cache_init();
 	kmemleak_init();
 	pgtable_init();
@@ -934,14 +936,22 @@ asmlinkage __visible void __init __no_sanitize_address start_kernel(void)
 	page_address_init();
 	pr_notice("%s", linux_banner);
 	early_security_init();
+	/// 在这里执行与架构相关的代码，包括了许多关于内存初始化的内容：
+	/// paging_init(x86/mm/init_64.c) --> zone_sizes_init(x86/mm/init.c) --> free_area_init(page_alloc.c)
+	/// 在free_area_init中，需要初始化所有的结点及其zone的结构，以及伙伴系统的结构
 	setup_arch(&command_line);
 	setup_boot_config();
 	setup_command_line(command_line);
 	setup_nr_cpu_ids();
+	/// 在SMP系统当中，setup_per_cpu_areas函数,负责将内核源代码中使用per_cpu定义的静态per-cpu变量进行初始化
+	/// 这种变量对于系统中的每个CPU都有一个独立的副本。此变量保存在内核二进制映像的一个独立的段中。setup_per_cpu_areas的目的是
+	/// 为系统的各个CPU变量分别创建一个这些数据的副本。
+	/// 在非SMP系统中，该函数是空操作
 	setup_per_cpu_areas();
 	smp_prepare_boot_cpu();	/* arch-specific boot-cpu hooks */
 	boot_cpu_hotplug_init();
 
+	/// 建立node和memory zone的数据结构
 	build_all_zonelists(NULL);
 	page_alloc_init();
 
@@ -969,6 +979,7 @@ asmlinkage __visible void __init __no_sanitize_address start_kernel(void)
 	vfs_caches_init_early();
 	sort_main_extable();
 	trap_init();
+	/// 包括mem_init, kmem_cache_init等
 	mm_init();
 
 	ftrace_init();
@@ -1082,6 +1093,8 @@ asmlinkage __visible void __init __no_sanitize_address start_kernel(void)
 		initrd_start = 0;
 	}
 #endif
+	/// 为zone中的pageset数组的第一个元素分配内存，即为第一个CPU分配，系统所有的zone都会考虑进来
+	/// 系统中其他CPU对应的pageset数组成员，将会在相应的CPU被激活时初始化
 	setup_per_cpu_pageset();
 	numa_policy_init();
 	acpi_early_init();

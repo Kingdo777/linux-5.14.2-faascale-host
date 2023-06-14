@@ -40,7 +40,7 @@
 #define PAGE_ALLOC_COSTLY_ORDER 3
 
 /**
- * MIGRATE_UNMOVABLE	不可移动, 核心内核分配的大部分页面都属于这一类。
+ * MIGRATE_UNMOVABLE	不可移动, 内核分配的大部分页面都属于这一类。
  * MIGRATE_MOVABLE	可移动，属于用户空间应用程序的页属于此类页面，它们是通过页表映射的，因此我们只需要更新页表项，并把数据复制到新位置就可以了，当然要注意，一个页面可能被多个进程共享，对应着多个页表项
  * MIGRATE_RECLAIMABLE	可回收,不能直接移动，但是可以回收，因为还可以从某些源重建页面，比如映射文件的数据属于这种类别，kswapd会按照一定的规则，周期性的回收这类页面。
  * MIGRATE_PCPTYPES	用来表示每CPU页框高速缓存的数据结构中的链表的迁移类型数目。
@@ -52,7 +52,10 @@ enum migratetype {
 	MIGRATE_UNMOVABLE,
 	MIGRATE_MOVABLE,
 	MIGRATE_RECLAIMABLE,
+	/// percpu高速page缓存中，只有上述三种类型
 	MIGRATE_PCPTYPES,	/* the number of types on the pcp lists */
+	/// ALLOC_HARDER标志会优先从MIGRATE_HIGHATOMIC中申请，如果没有则走正常流程，然
+	/// 后将申请得到的页块加入到MIGRATE_HIGHATOMIC中（注意，MIGRATE_HIGHATOMIC中的块是有上限的）
 	MIGRATE_HIGHATOMIC = MIGRATE_PCPTYPES,
 #ifdef CONFIG_CMA
 	/*
@@ -367,8 +370,11 @@ enum zone_watermarks {
 
 /* Fields and list protected by pagesets local_lock in page_alloc.c */
 struct per_cpu_pages {
+	/// 当前CPU高速缓存中页框个数
 	int count;		/* number of pages in the list */
+	/// 当此CPU高速缓存中页框个数大于high，则会将batch个页框放回伙伴系统
 	int high;		/* high watermark, emptying needed */
+	/// 在高速缓存中将要添加或被删去的页框个数，当链表中页框数量多个上界时会将batch个页框放回伙伴系统，当链表中页框数量为0时则从伙伴系统中获取batch个页框
 	int batch;		/* chunk size for buddy add/remove */
 	short free_factor;	/* batch scaling factor during free */
 #ifdef CONFIG_NUMA
@@ -376,6 +382,7 @@ struct per_cpu_pages {
 #endif
 
 	/* Lists of pages, one per migrate type stored on the pcp-lists */
+	///  页框的链表，如果需要冷高速缓存，从链表尾开始获取页框，如果需要热高速缓存，从链表头开始获取页框
 	struct list_head lists[NR_PCP_LISTS];
 };
 
@@ -412,6 +419,13 @@ enum zone_type {
 	 * platforms may need both zones as they support peripherals with
 	 * different DMA addressing limitations.
 	 */
+/**
+ * DMA（Direct Memory Access）是计算机技术中的一种方式，在I/O操作中，数据传输的过程中，数据从主机内存传输到设备。DMA区域是直接用于此类传输的内存区域。
+ * 当有外围设备无法对全部可寻址内存（ZONE_NORMAL）进行 DMA 时，会使用 ZONE_DMA 和 ZONE_DMA32。
+ * 在这个区域覆盖整个 32 位地址空间的体系结构上，将使用 ZONE_DMA32。对于具有较小 DMA 寻址约束的设备，则将 ZONE_DMA 留给它们。
+ * 这种区别很重要，因为当定义 ZONE_DMA32 时，会默认使用 32 位 DMA 掩码。
+ * 某些 64 位平台可能需要两个区域，因为它们支持具有不同 DMA 寻址限制的外围设备。
+ */
 #ifdef CONFIG_ZONE_DMA
 	ZONE_DMA,
 #endif
@@ -422,6 +436,11 @@ enum zone_type {
 	 * Normal addressable memory is in ZONE_NORMAL. DMA operations can be
 	 * performed on pages in ZONE_NORMAL if the DMA devices support
 	 * transfers to all addressable memory.
+	 */
+	/**
+	 * ZONE_NORMAL包含了一般分配给内核和用户进程的内存区域。
+	 * 如果DMA设备支持传输到所有可寻址内存区域，就可以在ZONE_NORMAL中的页面上执行DMA操作。
+	 * 也就是说，如果DMA设备可以传输到所有物理内存区域，不像一些特殊的DMA设备只能对一部分内存进行操作，那么ZONE_NORMAL中的物理页面就可以被用于DMA操作。
 	 */
 	ZONE_NORMAL,
 #ifdef CONFIG_HIGHMEM
@@ -500,9 +519,12 @@ struct zone {
 	/* Read-mostly fields */
 
 	/* zone watermarks, access with *_wmark_pages(zone) macros */
+	/// 这是触发页换出的水印，如果内存不足，内核可以将页写到硬盘中，这里的高，低和最小水位，会影响内存的换出策略
+	/// 如果空闲页多于高水位，那么就是理想的；如果低于低水位，那么就会开始进行页面换出；如果低于最低水位，那么就有很大的换出压力
 	unsigned long _watermark[NR_WMARK];
 	unsigned long watermark_boost;
 
+	/// 最少要保留多少页，来满足MIGRATE_HIGHATOMIC
 	unsigned long nr_reserved_highatomic;
 
 	/*
@@ -520,6 +542,7 @@ struct zone {
 	int node;
 #endif
 	struct pglist_data	*zone_pgdat;
+	/** 实现每CPU页框高速缓存，里面包含每个CPU的单页框的链表 */
 	struct per_cpu_pages	__percpu *per_cpu_pageset;
 	struct per_cpu_zonestat	__percpu *per_cpu_zonestats;
 	/*
@@ -578,6 +601,22 @@ struct zone {
 	 * mem_hotplug_begin/end(). Any reader who can't tolerant drift of
 	 * present_pages should get_online_mems() to get a stable value.
 	 */
+	/**
+	 * 对于一个内存区域，有以下三个指标：
+	 * 1. `spanned_pages` 是该区域的总页面数，包括空洞。计算方式为 `spanned_pages = zone_end_pfn - zone_start_pfn;`
+	 * 2. `present_pages` 是该区域中存在的物理页面数，不包括空洞。计算方式为 `present_pages = spanned_pages - absent_pages（空洞中的页面）;`
+	 * 3. `managed_pages` 是由伙伴系统管理的存在于该区域的页面数，不包括预留的页面（即通过bootmem分配器分配的页面）。计算方法是 `managed_pages = present_pages - reserved_pages;`。
+	 *
+	 * 此外，该区域还可能分配一些页面用于 CMA（Continuous Memory Allocator）使用。
+	 *
+	 * `present_pages` 可能会被内存热插拔或内存功耗管理逻辑使用，通过检查 `(present_pages - managed_pages)` 可以找出未受管理的页面。`managed_pages` 会被页面分配器和vm扫描器用于计算各种水位和阈值。
+	 * 锁定规则：
+	 * `zone_start_pfn` 和`spanned_pages` 受`span_seqlock` 保护。这是因为它必须在`zone->lock`外部读取，因为它在主分配器路径中完成，但它的写入非常少。
+	 * `span_seqlock` 和 `zone->lock`一起声明，因为它经常与 `zone->lock` 一起读取。它们有机会共同位于同一缓存行中，这是一个良好的实践。
+	 *
+	 * 运行时对 `present_pages` 的写访问应受`mem_hotplug_begin/end()` 保护。任何无法容忍`present_pages` 漂移的读者都应该调用`get_online_mems()` 以获取稳定的值。
+	 *
+	 * */
 	atomic_long_t		managed_pages;
 	unsigned long		spanned_pages;
 	unsigned long		present_pages;
@@ -596,7 +635,7 @@ struct zone {
 	unsigned long		nr_isolate_pageblock;
 #endif
 
-#ifdef CONFIG_MEMORY_HOTPLUG
+
 	/* see spanned/present_pages for more description */
 	seqlock_t		span_seqlock;
 #endif
@@ -604,9 +643,12 @@ struct zone {
 	int initialized;
 
 	/* Write-intensive fields used from the page allocator */
+	/// 空洞填充，保证被并发高速访问的zone的自旋锁，能保持在自己的 cache-line 中
 	ZONE_PADDING(_pad1_)
 
 	/* free areas of different sizes */
+	/* 标识出管理区中的空闲页框块，用于伙伴系统 */
+	/* MAX_ORDER为11，分别代表包含大小为1,2,4,8,16,32,64,128,256,512,1024个连续页框的链表*/
 	struct free_area	free_area[MAX_ORDER];
 
 	/* zone flags, see below */
@@ -737,6 +779,8 @@ static inline bool zone_intersects(struct zone *zone,
 /* Maximum number of zones on a zonelist */
 #define MAX_ZONES_PER_ZONELIST (MAX_NUMNODES * MAX_NR_ZONES)
 
+/// 一般来说，zone的后备列表就一条，用于指示分配优先级，但是对于NUMA中，存在一种__GFP_THISNODE的分配标志
+/// 这个标志指示了只能从本节点上寻找可用的zone，那么在NUMA中就多准备了一条后备列表，其上只存在自己节点的所有的zone
 enum {
 	ZONELIST_FALLBACK,	/* zonelist with fallback */
 #ifdef CONFIG_NUMA
@@ -773,6 +817,7 @@ struct zoneref {
  * zonelist_node_idx()	- Return the index of the node for an entry
  */
 struct zonelist {
+	/// MAX_ZONES_PER_ZONELIST 指示一个zonelist上有多少个zone，其值等于 节点数*每个结点上的zone数
 	struct zoneref _zonerefs[MAX_ZONES_PER_ZONELIST + 1];
 };
 
@@ -805,6 +850,9 @@ typedef struct pglist_data {
 	 * zones may be populated, but it is the full list. It is referenced by
 	 * this node's node_zonelists as well as other node's node_zonelists.
 	 */
+	 /// 包含了本节点上所有内存域，但是这些内存域不一定全部被占用和分配，但是数组是按照MAX_NR_ZONES
+	 /// 进行分配的，他表示了能够容纳的内存区域数量的上限。
+	 /// 此外，该数组也是其他节点上 "node_zonelists" 调用时的参考，因为它包含了所有内存区域的完整列表
 	struct zone node_zones[MAX_NR_ZONES];
 
 	/*
@@ -812,10 +860,23 @@ typedef struct pglist_data {
 	 * Generally the first zones will be references to this node's
 	 * node_zones.
 	 */
+	 /// 指定了所有节点上的所有可用zone，当然这是根据一定的优先级排序的，自己结点上的zone通常都是排在前面
+	 /// 一般来说，zone的后备列表就一条，用于指示分配优先级，但是对于NUMA中，存在一种__GFP_THISNODE的分配标志
+	 /// 这个标志指示了只能从本节点上寻找可用的zone，那么在NUMA中就多准备了一条后备列表，其上只存在自己节点的所有的zone
+	 /// 因此在NUMA中，MAX_ZONELISTS等于2，而在UMA中，MAX_ZONELISTS等于1
+	 /// 请注意，在以前的时候MAX_ZONELISTS并不是2，而是等于zone的数量，也就是为每一个节点上的zone都建立一个后备列表，其逻辑是：
+	 /// 对于申请Normal zone的page申请，我们可以将DMA zone的页面分配给他，但是反过来是不行的，因为DMA只能访问最低的16MB
+	 /// 因此DMA的后备列表其实就是各个节点上的其他的DMA
+	 /// 但是这种设计需要维护的表太多了，而且每个节点上zone的优先级关系完全就是确定的，那么就没必要为每个zone维护一个后备列表了
+	 /// 而是维护了一个大的列表，上面标注了所有的节点上所有zone的优先级
+	 /// 那么在分配时，就根据这一个表来寻找后备的zone，只不过加了一个判断，也就是 ac.highest_zoneidx, 可以通过对 page_alloc.c中get_page_from_freelist函数中我写的注释中看到这个判断+-v
 	struct zonelist node_zonelists[MAX_ZONELISTS];
 
+	/// 本节点上实际填充的zone数目
 	int nr_zones; /* number of populated zones in this node */
 #ifdef CONFIG_FLATMEM	/* means !SPARSEMEM */
+	/// 如果是FLATMEM内存模型，那么所有的page都在一个数组上，此结构就是这个数组的指针，
+	/// 关于内存模型，参考我之前写的博客：https://zhuanlan.zhihu.com/p/503695273
 	struct page *node_mem_map;
 #ifdef CONFIG_PAGE_EXTENSION
 	struct page_ext *node_page_ext;
@@ -836,13 +897,21 @@ typedef struct pglist_data {
 	 */
 	spinlock_t node_size_lock;
 #endif
+
+	/// 该NUMA节点的第一个页帧的逻辑编号，这个编号是全局唯一的，而不只是节点唯一
+	/// 在UMA系统中，node_start_pfn始终等于0
 	unsigned long node_start_pfn;
+	/// 指定了节点页帧的总数目
 	unsigned long node_present_pages; /* total number of physical pages */
+	/// 以页帧为单位的从长度，并不一定和node_present_pages相等，因为内存中可能存在hole，即空洞
 	unsigned long node_spanned_pages; /* total size of physical page
 					     range, including holes */
+	/// node的全局唯一ID，UMA系统中始终为0
 	int node_id;
+	/// swap守护进程的等待队列，将页帧换出节点时会用到
 	wait_queue_head_t kswapd_wait;
 	wait_queue_head_t pfmemalloc_wait;
+	/// 指向负责该结点的swap守护进程的task-struct
 	struct task_struct *kswapd;	/* Protected by
 					   mem_hotplug_begin/end() */
 	int kswapd_order;
@@ -1051,6 +1120,8 @@ static inline int is_highmem(struct zone *zone)
 /* These two functions are used to setup the per zone pages min values */
 struct ctl_table;
 
+/// min_free_kbytes 是内核为关键性分配保留的内存空间的最小值，该值会随着内存大小而增加，通常不会低于128KiB，而不会多余64MiB
+/// 用户在通过/prco/sys/vm/min_free_kbytes来修改
 int min_free_kbytes_sysctl_handler(struct ctl_table *, int, void *, size_t *,
 		loff_t *);
 int watermark_scale_factor_sysctl_handler(struct ctl_table *, int, void *,
@@ -1071,7 +1142,7 @@ extern char numa_zonelist_order[];
 #define NUMA_ZONELIST_ORDER_LEN	16
 
 #ifndef CONFIG_NUMA
-
+/// UMA 中只存在一个节点，所以只有一个page_date_t 结构，也就是这个全局的contig_page_data
 extern struct pglist_data contig_page_data;
 static inline struct pglist_data *NODE_DATA(int nid)
 {

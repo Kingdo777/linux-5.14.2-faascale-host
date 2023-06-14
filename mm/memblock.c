@@ -2017,10 +2017,12 @@ static void __init memmap_init_reserved_pages(void)
 	u64 i;
 
 	/* initialize struct pages for the reserved regions */
+	/// 初始化memblock中被标记为保留的page，被标记的page不会发往伙伴系统进行管理
 	for_each_reserved_mem_range(i, &start, &end)
 		reserve_bootmem_region(start, end);
 
 	/* and also treat struct pages for the NOMAP regions as PageReserved */
+	/// 将没有映射的区域也视为PageReserved
 	for_each_mem_region(region) {
 		if (memblock_is_nomap(region)) {
 			start = region->base;

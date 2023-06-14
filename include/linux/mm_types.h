@@ -85,6 +85,17 @@ struct page {
 			 */
 			struct list_head lru;
 			/* See page-flags.h for PAGE_MAPPING_FLAGS */
+			/**
+			 * mapping 指向了page frame所在的地址空间，而index是page在地址空间映射内部的偏移量。
+			 * 地址空间用于将文件的内容或者数据与装载这些数据的内存，即page-cache，关联起来。
+			 * 然而，对于匿名页，是不存在对应的文件的，此时它是指向匿名页的anon_vma结构的指针(该结构对于实现匿名页的逆向映射很重要).
+			 * 通过一个小的技巧，内核可以轻易的区分，mapping是指向地址空间还是匿名页的内存区，那就是判断该指针的最后一位是0还是1：
+			 * 	0: 表示这是指向address_space的指针
+			 *  1：表示这是指向匿名页的anon_vma的指针
+			 * 之所以可以使用这个技巧，是因为，address_space实例总是页对齐的，也就是说其低12位总是0，那么就可以用来记录一些有价值的信息
+			 * 
+			 * 
+			*/
 			struct address_space *mapping;
 			pgoff_t index;		/* Our offset within mapping. */
 			/**
@@ -92,6 +103,12 @@ struct page {
 			 * Usually used for buffer_heads if PagePrivate.
 			 * Used for swp_entry_t if PageSwapCache.
 			 * Indicates order in the buddy system if PageBuddy.
+			 */
+			/**
+			 * 这是 struct page 结构体中一个用于描述页属性的字段。private 字段是一个无符号长整型数值，用于在不同情况下指示页的额外信息，它的具体含义取决于页在内核中的使用方式。
+			 * 当页被用于缓存页面（如 buffer_head 或文件的映射页面），且页面处于私有状态（PagePrivate 标志被设置），则 private 字段用于存储跟此页面相关的私有数据。
+			 * 对于使用交换缓存的页面（PageSwapCache 标志被设置），private 字段用于存储 swp_entry_t 类型的值。swp_entry_t 类型表示页在交换分区中的位置和状态信息。
+			 * 若页面表示空闲空间块，则 private 字段则表示这一 Blocks 的阶数。
 			 */
 			unsigned long private;
 		};
@@ -190,6 +207,9 @@ struct page {
 		 * If the page can be mapped to userspace, encodes the number
 		 * of times this page is referenced by a page table.
 		 */
+		 /// 如果page被mmap到了userspace，那个这个计数是有效的，它表示被多少个页面项引用
+		 /// 如果是被内核的Slab使用，那么一个page只可能被引用一次，即始终是1，为了编程的清晰，这里使用
+		 /// 其他的变量即active等表示被SLab引用
 		atomic_t _mapcount;
 
 		/*
@@ -205,6 +225,8 @@ struct page {
 	};
 
 	/* Usage count. *DO NOT USE DIRECTLY*. See page_ref.h */
+	/// 页的引用计数，表示内核中引用该页的次数。在其值达到0时，表示该page当前不再被使用，因此可以删除。
+	/// 如果其值大于0，那么绝不会将其删除
 	atomic_t _refcount;
 
 #ifdef CONFIG_MEMCG

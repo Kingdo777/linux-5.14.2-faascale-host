@@ -583,6 +583,26 @@ static inline bool gfpflags_normal_context(const gfp_t gfp_flags)
  * 1001		__GFP_MOVABLE & __GFP_DMA	DMA / NORMAL
  * 1010		__GFP_MOVABLE & __GFP_HIGHMEM	HIGHMEM / NORMAL
  * 1100		__GFP_MOVABLE & __GFP_DMA32	DMA32 / NORMAL
+ *
+ * bit	comb     				result			Actual(In x64 System, No ZONE_HIGHMEM)
+ * ==========================================================================================================================
+ * 0x0    None					=> NORMAL		ZONE_NORMAL
+ * 0x1    __GFP_DMA				=> DMA or NORMAL	ZONE_DMA(有DMA就是DMA，没有则是Normal)
+ * 0x2    __GFP_HIGHMEM				=> HIGHMEM or NORMAL	ZONE_NORMAL(没有HIGHMEM则是Normal)
+ * 0x3    __GFP_(DMA+HIGHMEM)			=> BAD 			BAD
+ * 0x4    __GFP_DMA32				=> DMA32 or NORMAL	ZONE_DMA32(有DMA32就是DMA32)
+ * 0x5    __GFP_(DMA+DMA32)			=> BAD 			BAD
+ * 0x6    __GFP_HIGHMEM+DMA32)			=> BAD			BAD
+ * 0x7    __GFP_(HIGHMEM+DMA32+DMA)		=> BAD			BAD
+ * 0x8    __GFP_MOVABLE				=> NORMAL		ZONE_NORMAL(单独使用MOVABLE无效)
+ * 0x9    __GFP_(MOVABLE+DMA)			=> DMA or NORMAL	ZONE_DMA
+ * 0xa    __GFP_(MOVABLE+HIGHMEM)		=> MOVABLE 		ZONE_MOVABLE(__GFP_MOVABLE必须要和__GFP_HIGHMEM一起使用)
+ * 0xb    __GFP_(OVABLE+HIGHMEM+DMA)		=> BAD			BAD
+ * 0xc    __GFP_(MOVABLE+DMA32)			=> DMA32 or NORMAL	ZONE_DMA32
+ * 0xd    __GFP_(MOVABLE+DMA32+DMA)		=> BAD			BAD
+ * 0xe    __GFP_(MOVABLE+DMA32+HIGHMEM)		=> BAD			BAD
+ * 0xf    __GFP_(MOVABLE+DMA32+HIGHMEM+DMA)	=> BAD			BAD
+ *
  * */
 
 #if defined(CONFIG_ZONE_DEVICE) && (MAX_NR_ZONES-1) <= 4

@@ -1165,14 +1165,18 @@ done_merging:
 static inline bool page_expected_state(struct page *page,
 					unsigned long check_flags)
 {
+	/// page 不能存在映射的计数，即没有映射到用户空间
 	if (unlikely(atomic_read(&page->_mapcount) != -1))
 		return false;
 
+	/// 不能有对应的地址空间，也不能有任何引用计数
 	if (unlikely((unsigned long)page->mapping |
 			page_ref_count(page) |
 #ifdef CONFIG_MEMCG
+		     /// 不能被Memory-Cgroup统计
 			page->memcg_data |
 #endif
+		     	/// 不能有任何硬件毒化标志
 			(page->flags & check_flags)))
 		return false;
 
@@ -2337,6 +2341,11 @@ static void check_new_page_bad(struct page *page)
  */
 static inline int check_new_page(struct page *page)
 {
+	/// PAGE_FLAGS_CHECK_AT_PREP表示在将page归还给伙伴系统的时候合理的标志是什么，
+	/// 这个标识默认是全部清零，但是有一个标志除外，那就是PG_HWPOISON，它表示page被硬件标记为已经损坏。
+
+	/// 在重新分配page的时候，PG_HWPOISON的页是不能被分配出去的，因此在这里需要进行检查，
+	/// 即从伙伴系统出来的页，应该是没有任何标记的。
 	if (likely(page_expected_state(page,
 				PAGE_FLAGS_CHECK_AT_PREP|__PG_HWPOISON)))
 		return 0;
@@ -2387,11 +2396,11 @@ static bool check_new_pages(struct page *page, unsigned int order)
 	int i;
 	for (i = 0; i < (1 << order); i++) {
 		struct page *p = page + i;
-
+		/// 通过的返回值是0，因此这里返回true表示未通过检查
 		if (unlikely(check_new_page(p)))
 			return true;
 	}
-
+	/// 只有当所有的page都没问题时，才会返回false，即全部通过检查
 	return false;
 }
 
@@ -2409,6 +2418,15 @@ inline void post_alloc_hook(struct page *page, unsigned int order,
 	 * Otherwise, the poison pattern will be overwritten for __GFP_ZERO
 	 * allocations and the page unpoisoning code will complain.
 	 */
+	/**
+	 *
+	 * 在进行内存初始化之前，需要对页面进行解除污染（unpoison）操作。
+	 *
+	 * 在进行内存分配时，如果使用了__GFP_ZERO标志，内核会将分配的页面内容清零。
+	 * 然而，如果页面在此之前已经被设置为污染模式，那么清零操作将会覆盖污染模式，导致页面解除污染的代码报错。
+	 * 为了避免这种情况，需要在进行内存初始化之前对页面进行解除污染操作。kernel_unpoison_pages函数用于解除页面的污染状态。
+	 * 这样，在进行内存初始化时，页面的污染模式就不会被覆盖，从而保持页面解除污染的有效性。
+	 * */
 	kernel_unpoison_pages(page, 1 << order);
 
 	/*
@@ -2419,6 +2437,18 @@ inline void post_alloc_hook(struct page *page, unsigned int order,
 	if (kasan_has_integrated_init()) {
 		kasan_alloc_pages(page, order, gfp_flags);
 	} else {
+		/**
+		 * 有两个内核参数CONFIG_INIT_ON_ALLOC_DEFAULT_ON和CONFIG_INIT_ON_FREE_DEFAULT_ON，
+		 * 前者是指在分配page时，对page进行初始化，后者是指，在释放page对其进行初始化。
+		 * 两者的目的是类似的，但是显然不能同时配置，否则代价太大。
+		 *
+		 * want_init_on_free则是检查是否开启了CONFIG_INIT_ON_FREE_DEFAULT_ON，
+		 * 如果是的话，就没有必要在此时即分配时，对page进行初始化；
+		 * want_init_on_alloc则是检查CONFIG_INIT_ON_ALLOC_DEFAULT_ON参数，
+		 * 以及是否设置了__GFP_ZERO标志。
+		 *
+		 * 最终，如果init为真，则表示需要初始化page
+		 * */
 		bool init = !want_init_on_free() && want_init_on_alloc(gfp_flags);
 
 		kasan_unpoison_pages(page, order, init);
@@ -2444,6 +2474,14 @@ static void prep_new_page(struct page *page, unsigned int order, gfp_t gfp_flags
 	 * steps that will free more memory. The caller should avoid the page
 	 * being used for !PFMEMALLOC purposes.
 	 */
+	/**
+	 * 如果 alloc_flags 中设置了 ALLOC_NO_WATERMARKS 标志，表示在分配页面时没有进行水位标记检查。
+	 * 这通常是由于之前的水位标记检查失败，并且调用方在采取一些措施以释放更多内存。在这种情况下，
+	 * 设置页面的 pfmemalloc 标志，表示该页面是通过 ALLOC_NO_WATERMARKS 进行分配的，
+	 * 并且期望caller采取进一步的措施来释放更多内存。
+	 *
+	 * 如果 alloc_flags 中未设置 ALLOC_NO_WATERMARKS 标志，则清除页面的 pfmemalloc 标志。
+	 * */
 	if (alloc_flags & ALLOC_NO_WATERMARKS)
 		set_page_pfmemalloc(page);
 	else
@@ -3673,6 +3711,7 @@ static struct page *rmqueue_pcplist(struct zone *preferred_zone,
 	struct page *page;
 	unsigned long flags;
 
+	/// 对pageset进行上锁
 	local_lock_irqsave(&pagesets.lock, flags);
 
 	/*
@@ -3680,13 +3719,20 @@ static struct page *rmqueue_pcplist(struct zone *preferred_zone,
 	 * See nr_pcp_free() where free_factor is increased for subsequent
 	 * frees.
 	 */
+	/// 获取到当前cpu对应的per_cpu_pageset
 	pcp = this_cpu_ptr(zone->per_cpu_pageset);
+	/// pcp->free_factor 是用于确定一次性释放的页面数量的因子。
+	/// 在进行内存分配时，将其右移 1 位，即除以 2，可以减小批量释放的页面数量。
 	pcp->free_factor >>= 1;
+	/// 根据order和迁移类型，获取per_cpu_pageset中对应的list
 	list = &pcp->lists[order_to_pindex(migratetype, order)];
 	page = __rmqueue_pcplist(zone, order, migratetype, alloc_flags, pcp, list);
+	/// 解锁
 	local_unlock_irqrestore(&pagesets.lock, flags);
 	if (page) {
+		/// 统计，在该zone, 通过page_zonenum(page)获得，中发生了一次页分配事件
 		__count_zid_vm_events(PGALLOC, page_zonenum(page), 1);
+		/// 更新NUMA存访的命中/未命中统计信息
 		zone_statistics(preferred_zone, zone, 1);
 	}
 	return page;
@@ -3736,7 +3782,8 @@ struct page *rmqueue(struct zone *preferred_zone,
 		 * reserved for high-order atomic allocation, so order-0
 		 * request should skip it.
 		 */
-		/// order !=0 && costly alloc(order > PAGE_ALLOC_COSTLY_ORDER)
+		/// 如果设置了ALLOC_HARDER分配标志，则优先从MIGRATE_HIGHATOMIC迁移类型链表中申请空闲页
+		/// __rmqueue_smallest会在后面的展开
 		if (order > 0 && alloc_flags & ALLOC_HARDER) {
 			page = __rmqueue_smallest(zone, order, MIGRATE_HIGHATOMIC);
 			if (page)
@@ -3877,7 +3924,7 @@ bool __zone_watermark_ok(struct zone *z, unsigned int order, unsigned long mark,
 			 int highest_zoneidx, unsigned int alloc_flags,
 			 long free_pages)
 {
-	long min = mark;
+	unsigned long min = mark;
 	int o;
 	const bool alloc_harder = (alloc_flags & (ALLOC_HARDER|ALLOC_OOM));
 
@@ -3913,6 +3960,10 @@ bool __zone_watermark_ok(struct zone *z, unsigned int order, unsigned long mark,
 		return true;
 
 	/* For a high-order request, check at least one suitable page is free */
+	/**
+	 * 如果order>0，在>=order的所有阶对应的链表上，在三个迁移类型中，至少存在一个空闲的page；
+	 * 或者如果设置了ALLOC_HARDER|ALLOC_OOM，MIGRATE_HIGHATOMIC迁移类型上存在一个page
+	 * */
 	for (o = order; o < MAX_ORDER; o++) {
 		struct free_area *area = &z->free_area[o];
 		int mt;
@@ -3925,12 +3976,6 @@ bool __zone_watermark_ok(struct zone *z, unsigned int order, unsigned long mark,
 				return true;
 		}
 
-#ifdef CONFIG_CMA
-		if ((alloc_flags & ALLOC_CMA) &&
-		    !free_area_empty(area, MIGRATE_CMA)) {
-			return true;
-		}
-#endif
 		if (alloc_harder && !free_area_empty(area, MIGRATE_HIGHATOMIC))
 			return true;
 	}
@@ -4114,6 +4159,18 @@ retry:
 		 * will require awareness of nodes in the
 		 * dirty-throttling and the flusher threads.
 		 */
+		/**
+		 * 脏页节点分配策略, 是在写入分配页面缓存页时，根据脏页限制策略选择合适的节点
+		 *
+		 * 确切地说，如果 ac->spread_dirty_pages 为真，那么在遍历不同的zone时，
+		 * 会检查 zone->zone_pgdat 是否与 last_pgdat_dirty_limit 相同。
+		 * 如果相同，表示上一个被检查的zone已经超过了内核限制的脏页数目，因此继续循环下一个zone。
+		 *
+		 * 如果不同，会继续进行下一步的判断, 首先，会检查当前的区域 zone->zone_pgdat 是否满足脏页限制，
+		 * 即调用 node_dirty_ok(zone->zone_pgdat) 来判断是否可以在该区域分配页面缓存页用于写入。
+		 * 如果当前的区域满足脏页限制，那么就可以在该区域进行分配。否则同样会结束本次循环，
+		 * 继续遍历下一个zone，同时将last_pgdat_dirty_limit设置为当前节点.
+		 * */
 		if (ac->spread_dirty_pages) {
 			if (last_pgdat_dirty_limit == zone->zone_pgdat)
 				continue;
@@ -4124,6 +4181,12 @@ retry:
 			}
 		}
 
+		/**
+		 * 如果当前zone位于远程节点，那么为了保持内存分配的本地性，会将 alloc_flags 中的
+		 * ALLOC_NOFRAGMENT 标志清除，然后跳转到 retry 标签处，重新尝试内存分配。
+		 *
+		 * 这一点在前面讲过，节点的本地性要比碎片化问题更重要
+		 * */
 		if (no_fallback && nr_online_nodes > 1 &&
 		    zone != ac->preferred_zoneref->zone) {
 			int local_nid;
@@ -4196,10 +4259,10 @@ try_this_zone:
 			 */
 			/** 这段代码用于保留MIGRATE_HIGHATOMIC迁移类型的page，即每当遇到ALLOC_HARDER
 			 * 时，就将其成功申请的page放入MIGRATE_HIGHATOMIC中，下次再遇到ALLOC_HARDER
-			 * 依然优先保证从MIGRATE_HIGHATOMIC中分配，当然MIGRATE_HIGHATOMIC中预留的page是有限制的，
+			 * 依然优先从MIGRATE_HIGHATOMIC中分配，当然MIGRATE_HIGHATOMIC中预留的page是有限制的，
 			 * 值为zone大小的1/100，且至少是一个pageblock.
-			 * MIGRATE_HIGHATOMIC是不存为任何人后备list的，因此进入MIGRATE_HIGHATOMIC的page除非系统资源非常紧张,
-			 * 在慢路径中被回收，负责是不会动他的
+			 * MIGRATE_HIGHATOMIC不是任何zone后备列表，因此进入MIGRATE_HIGHATOMIC的page
+			 * 是不会被轻易分配出去的，除非系统资源非常紧张,使其在慢路径中被回收
 			 */
 			if (unlikely(order && (alloc_flags & ALLOC_HARDER)))
 				reserve_highatomic_pageblock(page, zone, order);
@@ -4220,6 +4283,9 @@ try_this_zone:
 	 * It's possible on a UMA machine to get through all zones that are
 	 * fragmented. If avoiding fragmentation, reset and try again.
 	 */
+	/**
+	 * 判断是否启用了ALLOC_NOFRAGMENT参数，如果是则擦除该标志后，重新尝试内存分配
+	 * */
 	if (no_fallback) {
 		alloc_flags &= ~ALLOC_NOFRAGMENT;
 		goto retry;
@@ -5187,6 +5253,11 @@ static inline bool prepare_alloc_pages(gfp_t gfp_mask, unsigned int order,
 		 * When we are in the interrupt context, it is irrelevant
 		 * to the current task context. It means that any node ok.
 		 */
+		/**
+		 * 如果当前正在处理中断，那么它与current任务的上下文无关，可以分配在任意节点中。
+		 * 因此如果当前是中断上下文，或者已经指定了nodemask，那么只需要将alloc_flags添加ALLOC_CPUSET标志，
+		 * 否则如果不是中断上下文并且也没有指定nodemask，那么就需要将nodemask设置为current任务允许的内存范围
+		 * */
 		if (!in_interrupt() && !ac->nodemask)
 			ac->nodemask = &cpuset_current_mems_allowed;
 		else
@@ -5384,9 +5455,35 @@ EXPORT_SYMBOL_GPL(__alloc_pages_bulk);
 /*
  * This is the 'heart' of the zoned buddy allocator.
  */
+/**
+ * 这是分区伙伴分配器的核心部分，用于分配一定数量的页面。
+ *
+ * 函数的参数如下：
+ * @gfp：表示页面分配的标志位，它指定了分配页面时的一些特性和要求。
+ * @order：表示要分配的页面数量，以2的幂次方形式表示。
+ * @preferred_nid：表示首选的节点ID，用于指定在哪个节点上进行页面分配。
+ * @nodemask：表示一个节点掩码，用于限制分配页面的节点范围。
+ *
+ * 函数的返回值是一个指向分配的页面的结构体指针。
+ * */
 struct page *__alloc_pages(gfp_t gfp, unsigned int order, int preferred_nid,
 							nodemask_t *nodemask)
 {
+	/**
+	 * 初始化一些变量。
+	 * 其中 alloc_context 用于在page分配所涉及的 alloc_pages系列的函数之间传递大部分的不可变的参数。其包括：
+	 * truct zonelist *zonelist;
+	 * nodemask_t *nodemask;
+	 * struct zoneref *preferred_zoneref;
+	 * int migratetype;
+	 * enum zone_type highest_zoneidx;
+	 * bool spread_dirty_pages;
+	 *
+	 * 其中 nodemask, migratetype and highest_zoneidx 仅仅在调用__alloc_pages()时初始化一次，之后便不在改变；
+	 * zonelist, preferred_zone and highest_zoneidx 会在__alloc_pages()的快速路径被设置一次，如果快速路径失败，那么可能会在慢路径中被修改。
+	 *
+	 * 所有的函数的传递此结构均通过一个const类型的指针
+	 * */
 	struct page *page;
 	unsigned int alloc_flags = ALLOC_WMARK_LOW;
 	gfp_t alloc_gfp; /* The gfp_t that was actually used for allocation */
@@ -5404,6 +5501,11 @@ struct page *__alloc_pages(gfp_t gfp, unsigned int order, int preferred_nid,
 	/// gfp_allowed_mask,数值上等于 GFP_BOOT_MASK 即：
 	/// (__GFP_BITS_MASK & ~(__GFP_RECLAIM|__GFP_IO|__GFP_FS))
 	/// 也就是说在BOOT阶段，一些flags是不允许使用的
+	/// 检查 gfp是否合法。
+	/// gfp_allowed_mask在启动阶段被初始化为：GFP_BOOT_MASK，其定义为：
+	/// #define GFP_BOOT_MASK (__GFP_BITS_MASK & ~(__GFP_RECLAIM|__GFP_IO|__GFP_FS))
+	/// 即不允许进行任何的内存回收、IO以及设计VFS的操作。
+	/// 当内核初始化完成后，会通过函数start_kernel...kernel_init.kernel_init_freeable重新设置该值
 	gfp &= gfp_allowed_mask;
 	/*
 	 * Apply scoped allocation constraints. This is mainly about GFP_NOFS
@@ -5411,6 +5513,14 @@ struct page *__alloc_pages(gfp_t gfp, unsigned int order, int preferred_nid,
 	 * from a particular context which has been marked by
 	 * memalloc_no{fs,io}_{save,restore}. And PF_MEMALLOC_PIN which ensures
 	 * movable zones are not used during allocation.
+	 */
+	/** 在关于GFP标志符的讨论中曾经讲到，对于GFP_IO和GFP_FS两个标志，是不推荐直接使用的，
+	 * 而是要通过memalloc_noio_{save,restore}以及memalloc_nofs_{save,restore}来标志.
+	 *
+	 * 在这里我们将检查当前task是否存在该标记，如果存在则自动的添加对应的gfp.
+	 *
+	 * 需要特别注意的是，如果task被标记为PF_MEMALLOC_PIN，这意味着他会长时间的将内存锁住，
+	 * 这个时候我们需要清除__GFP_MOVABLE标记，即不能从可移动zone中分配内存
 	 */
 	gfp = current_gfp_context(gfp);
 	alloc_gfp = gfp;
@@ -5426,6 +5536,9 @@ struct page *__alloc_pages(gfp_t gfp, unsigned int order, int preferred_nid,
 	 * 用于添加ALLOC_NOFRAGMENT标志，此标志指示，在执行__rmqueue_fallback从其他迁移类型的list
 	 * 中偷取page时，要按pageblock整块偷取，避免造成一个pageblock上混合多种迁移类型
 	 * */
+	 /**
+	  *
+	  * */
 	alloc_flags |= alloc_flags_nofragment(ac.preferred_zoneref->zone, gfp);
 
 	/* First allocation attempt */
@@ -5434,13 +5547,17 @@ struct page *__alloc_pages(gfp_t gfp, unsigned int order, int preferred_nid,
 	if (likely(page))
 		goto out;
 
+	/// 恢复最开始的gfp，因为在prepare_alloc_pages中，我们会因为开启了cpusets_enabled
+	/// 而强制添加该标志，但是可能原来并未添加此标志
 	alloc_gfp = gfp;
+	/// 不要在考虑脏页均衡问题，因为现在已经内存告急
 	ac.spread_dirty_pages = false;
 
 	/*
 	 * Restore the original nodemask if it was potentially replaced with
 	 * &cpuset_current_mems_allowed to optimize the fast-path attempt.
 	 */
+	/// 同样恢复原本申请时提供的nodemask，这个值在prepare_alloc_pages也可能被修改
 	ac.nodemask = nodemask;
 
 	page = __alloc_pages_slowpath(alloc_gfp, order, &ac);
@@ -5448,6 +5565,8 @@ struct page *__alloc_pages(gfp_t gfp, unsigned int order, int preferred_nid,
 out:
 	if (memcg_kmem_enabled() && (gfp & __GFP_ACCOUNT) && page &&
 	    unlikely(__memcg_kmem_charge_page(page, gfp, order) != 0)) {
+		/// 这一步将分配给内核的page统计到cgroup中，如果统计失败，那么将释放这次分配的page
+		/// 在这里仅仅记录用于内核的page的统计，对于用于用户进程的，会在成功申请page之后再进行统计
 		__free_pages(page, order);
 		page = NULL;
 	}
@@ -6137,6 +6256,8 @@ static int build_zonerefs_node(pg_data_t *pgdat, struct zoneref *zonerefs)
 	enum zone_type zone_type = MAX_NR_ZONES;
 	int nr_zones = 0;
 
+	/// 这个函数是倒着进行初始化的，也就是越高的内存zone优先级越高，即：
+	/// 可移动的zone > Normal > DMA32 > DMA
 	do {
 		zone_type--;
 		zone = pgdat->node_zones + zone_type;
@@ -6344,6 +6465,7 @@ static void setup_min_unmapped_ratio(void);
 static void setup_min_slab_ratio(void);
 #else	/* CONFIG_NUMA */
 
+/// UMA 结构下，初始化结点的zonelist
 static void build_zonelists(pg_data_t *pgdat)
 {
 	int node, local_node;
@@ -6352,8 +6474,13 @@ static void build_zonelists(pg_data_t *pgdat)
 
 	local_node = pgdat->node_id;
 
+	/// UMA中，只有一个zone的后备列表，即ZONELIST_FALLBACK；
+	/// 而在NUMA中，存在两条，一条是常规的，串联了所有节点及其zone的后备列表，另一条是只有自己的节点的后备列表，其用于分配标志为__GFP_THISNODE的内存分配
+	/// zonerefs 是数组头指针，数组的大小是节点数乘以可用zone数+1，这里的＋1对应了本函数最后的那一项
 	zonerefs = pgdat->node_zonelists[ZONELIST_FALLBACK]._zonerefs;
+	/// 返回值nr_zones是build_zonerefs_node操作一共填充了多少向
 	nr_zones = build_zonerefs_node(pgdat, zonerefs);
+	/// 让指针前进
 	zonerefs += nr_zones;
 
 	/*
@@ -6377,6 +6504,7 @@ static void build_zonelists(pg_data_t *pgdat)
 		zonerefs += nr_zones;
 	}
 
+	/// 数组的最后一个元素，给他填充为null
 	zonerefs->zone = NULL;
 	zonerefs->zone_idx = 0;
 }
@@ -6423,6 +6551,7 @@ static void __build_all_zonelists(void *data)
 	 * This node is hotadded and no memory is yet present.   So just
 	 * building zonelists is fine - no need to touch other nodes.
 	 */
+	 /// 只有在节点是热插入的时候，才会单独对这个节点进行初始化，而在系统启动后进行初始化时，所有的节点都会被初始化
 	if (self && !node_online(self->node_id)) {
 		build_zonelists(self);
 	} else {
@@ -6482,6 +6611,8 @@ build_all_zonelists_init(void)
  * __ref due to call of __init annotated helper build_all_zonelists_init
  * [protected by SYSTEM_BOOTING].
  */
+ /// 在init/main.c中，调用为：build_all_zonelists(NULL);
+ /// 因此这个pgdat参数在初始化的时候是NULL
 void __ref build_all_zonelists(pg_data_t *pgdat)
 {
 	unsigned long vm_total_pages;
@@ -7167,6 +7298,11 @@ static unsigned long __init zone_spanned_pages_in_node(int nid,
 		return 0;
 
 	/* Get the start and end of the zone */
+	/// clamp 函数是一个确保某个值在一个指定的范围内的宏，并使用 min/max 函数进行实现：
+	/// #define clamp(val, lo, hi) min((typeof(val))max(val, lo), hi)
+	/// val：待限制的值
+	/// lo：最小的允许值。如果 val 小于 lo，则返回 lo
+	/// hi：最大的允许值。如果 val 大于 hi，则返回 hi
 	*zone_start_pfn = clamp(node_start_pfn, zone_low, zone_high);
 	*zone_end_pfn = clamp(node_end_pfn, zone_low, zone_high);
 	adjust_zone_range_for_zone_movable(nid, zone_type,
@@ -7997,6 +8133,7 @@ void __init free_area_init(unsigned long *max_zone_pfn)
 				sizeof(arch_zone_highest_possible_pfn));
 
 	start_pfn = find_min_pfn_with_active_regions();
+	/// x86_64下恒为false
 	descending = arch_has_descending_max_zone_pfns();
 
 	for (i = 0; i < MAX_NR_ZONES; i++) {
