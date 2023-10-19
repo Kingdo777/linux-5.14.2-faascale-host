@@ -1,14 +1,14 @@
 #!/bin/bash
 
-KERNEL_DIR=/home/kingdo/CLionProjects/linux_kernel_5_10
+KERNEL_DIR=/home/kingdo/CLionProjects/linux_kernel_5_14_2
 CORE_COUNT=$(nproc)
 
 ARCH=x86_64
 Release=ubuntu
-Version=20
+Version=22
 
-rootfs_image=$KERNEL_DIR/zxm/rootfs/rootfs_${Release}-${Version}_${ARCH}.ext4
-rootfs_path=$KERNEL_DIR/zxm/rootfs/rootfs_${Release}-${Version}_${ARCH}
+rootfs_image=$KERNEL_DIR/ROOTFS-IMG/rootfs_${Release}-${Version}_${ARCH}.ext4
+rootfs_path=$KERNEL_DIR/ROOTFS-IMG/rootfs_${Release}-${Version}_${ARCH}
 
 update_rootfs() {
   if [ ! -f "$rootfs_image" ]; then
@@ -47,7 +47,6 @@ create_img() {
 check_root() {
   if [ "$(id -u)" != "0" ]; then
     echo "superuser privileges are required to run"
-    echo "sudo $0 build_rootfs"
     exit 1
   fi
 }
@@ -68,12 +67,17 @@ check_no_img() {
 
 check_root
 
+if [ $# -ne 1 ]; then
+  echo "Usage: $0 {create|update}"
+  exit 1
+fi
+
 case $1 in
 create)
-  check_no_img ;;
+  check_no_img
+  ;;
 update)
   check_img
-  update_rootfs ;;
+  update_rootfs
+  ;;
 esac
-
-

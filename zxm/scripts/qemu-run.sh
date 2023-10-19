@@ -14,7 +14,7 @@ net_scripts=/home/kingdo/CLionProjects/linux_kernel_5_10/zxm/scripts/network
 check_root() {
   if [ "$(id -u)" != "0" ]; then
     echo "superuser privileges are required to run"
-    echo "sudo $0 build_rootfs"
+    echo "sudo $0 help"
     exit 1
   fi
 }
@@ -31,7 +31,7 @@ check_img() {
   fi
 }
 
-specific_qemu_args="-m 16G -smp 4 --enable-kvm -cpu host"
+specific_qemu_args="-m 5G -smp 4 --enable-kvm -cpu host"
 
 check_img
 check_root
@@ -43,7 +43,7 @@ run_qmp_sock)
   specific_qemu_args=$(
     cat <<EOF
   -qmp unix:/tmp/qmp.sock,server=on,wait=off
-  -m 8G -smp 4 --enable-kvm -cpu host
+  -m 5G -smp 4 --enable-kvm -cpu host
 EOF
   )
   ;;
@@ -53,8 +53,7 @@ run_virtio_mem)
   -m 256M,maxmem=8448M
   -smp 4 --enable-kvm -cpu host
   -object memory-backend-ram,id=vmem0,size=8G,prealloc=off
-  -device virtio-mem-pci,id=vm0,memdev=vmem0,node=0,requested-size=0,block-size=4M,prealloc=off
-  -qmp unix:/tmp/qmp.sock,server=on,wait=off
+  -device virtio-mem-pci,id=vm0,memdev=vmem0,node=0,requested-size=0,block-size=4M,prealloc=on
 EOF
   )
   ;;
@@ -69,7 +68,7 @@ run_numa)
   -numa node,nodeid=0,cpus=0-1,memdev=mem0
   -numa node,nodeid=1,cpus=2-3,memdev=mem1
   -object memory-backend-ram,id=vmem0,size=8G,prealloc=off
-  -device virtio-mem-pci,id=vm0,memdev=vmem0,node=0,requested-size=4M,prealloc=on
+  -device virtio-mem-pci,id=vm0,memdev=vmem0,node=0,requested-size=4M,prealloc=off
   -qmp unix:/tmp/qmp.sock,server=on,wait=off
 EOF
   )
@@ -77,17 +76,39 @@ EOF
 debug)
   specific_qemu_args="-m 16G -s -S"
   ;;
+help)
+  echo "Usage: $0 [run|run_qmp_sock|run_virtio_mem|run_numa|debug]"
+  exit 0
+  ;;
 
 esac
 
 set -x
+kill -9 "$(pgrep -of qemu-system-x86_64)"
+
+###########################################  create memory-cgroup v2 for qemu ##########################
+qemu_cgroup="/sys/fs/cgroup/qemu"
+orign_bash_cgroup="/sys/fs/cgroup$(cat /proc/$$/cgroup | awk -F ':' '{print $3}')"
+if [ ! -d "$qemu_cgroup" ]; then
+  mkdir -p $qemu_cgroup
+else
+  rmdir $qemu_cgroup
+  mkdir -p $qemu_cgroup
+fi
+###########################################  add bash to cgroup ########################################
+echo $$ >> $qemu_cgroup/cgroup.procs
+###########################################  run qemu ##################################################
 $QEMU_DIR/build/qemu-system-x86_64 \
   -nographic -kernel $kernel_image \
   -append "noinintrd console=ttyS0 root=/dev/vda rw loglevel=8 nokaslr mminit_loglevel=7" \
-  -device virtio-balloon \
+  -device virtio-balloon,prealloc=on \
   -drive if=none,file=$rootfs_image,id=hd0,format=raw -device virtio-blk-pci,drive=hd0 \
   -nic tap,ifname=tap0,model=virtio-net-pci,script=$net_scripts/ifup.sh,downscript=$net_scripts/ifdown.sh \
   $specific_qemu_args
+########################################### remove bash from cgroup #####################################
+echo $$ >> $orign_bash_cgroup/cgroup.procs
+###########################################  delete qemu-cgroup #########################################
+rmdir $qemu_cgroup
 
 #  -append "noinintrd console=ttyS0 root=/dev/sda rw loglevel=8 nokaslr" \
 #  -drive file=$rootfs_image,index=0,media=disk,format=raw \
