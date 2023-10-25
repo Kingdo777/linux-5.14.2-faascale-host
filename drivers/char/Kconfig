@@ -411,6 +411,22 @@ config TELCLOCK
 	  /sys/devices/platform/telco_clock, with a number of files for
 	  controlling the behavior of this hardware.
 
+config USER_POPULATE_FD
+	tristate "Test for a new char device"
+	default y
+	help
+	  userpopulatefd is used to move pages from one private anonymous VMA to
+	  another within the same process. It is essential to ensure that the source
+	  VMA's pages are all present, meaning no page faults are triggered, and the
+	  destination VMA's pages are all absent, meaning that accessing each page
+	  will trigger a page fault.
+
+	  After executing this command, the subsequent access semantics for both VMAs
+	  will be entirely equivalent to first using memcpy to copy the contents from
+	  the source VMA to the destination VMA, and then applying madvise(MADV_DONTNEED)
+	  to the source VMA. However, it's important to note that userpopulatefd does
+	  not result in page allocation and deallocation but rather in the movement of pages.
+
 source "drivers/s390/char/Kconfig"
 
 source "drivers/char/xillybus/Kconfig"
