@@ -94,6 +94,11 @@ struct kvm_memory_region {
 	__u64 memory_size; /* bytes */
 };
 
+struct kvm_userspace_prealloc_memory_region{
+	__u64 guest_phys_addr;
+	__u64 memory_size; /* bytes */
+};
+
 /* for KVM_SET_USER_MEMORY_REGION */
 struct kvm_userspace_memory_region {
 	__u32 slot;
@@ -1372,6 +1377,8 @@ struct kvm_vfio_spapr_tce {
 					struct kvm_userspace_memory_region)
 #define KVM_SET_TSS_ADDR          _IO(KVMIO,   0x47)
 #define KVM_SET_IDENTITY_MAP_ADDR _IOW(KVMIO,  0x48, __u64)
+#define KVM_PREALLOC_USER_MEMORY_REGION _IOW(KVMIO, 0x49, \
+					struct kvm_userspace_prealloc_memory_region)
 
 /* enable ucontrol for s390 */
 struct kvm_s390_ucas_mapping {

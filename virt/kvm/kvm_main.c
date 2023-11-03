@@ -4236,6 +4236,19 @@ static long kvm_vm_ioctl(struct file *filp,
 		r = kvm_vm_ioctl_set_memory_region(kvm, &kvm_userspace_mem);
 		break;
 	}
+	case KVM_PREALLOC_USER_MEMORY_REGION: {
+		struct kvm_userspace_prealloc_memory_region kvm_userspace_mem;
+
+		r = -EFAULT;
+		if (copy_from_user(&kvm_userspace_mem, argp,
+				   sizeof(kvm_userspace_mem)))
+			goto out;
+
+//		pr_info("KINGDO: KVM_PREALLOC_USER_MEMORY_REGION\n");
+
+		r = kvm_prealloc_user_memory_region(kvm, &kvm_userspace_mem);
+		break;
+	}
 	case KVM_GET_DIRTY_LOG: {
 		struct kvm_dirty_log log;
 

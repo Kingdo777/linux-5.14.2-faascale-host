@@ -19,6 +19,9 @@
 #include <asm/page.h>
 #include "internal.h"
 
+u64 tdp_count;
+EXPORT_SYMBOL_GPL(tdp_count);
+
 void __attribute__((weak)) arch_report_meminfo(struct seq_file *m)
 {
 }
@@ -27,6 +30,12 @@ static void show_val_kb(struct seq_file *m, const char *s, unsigned long num)
 {
 	seq_put_decimal_ull_width(m, s, num << (PAGE_SHIFT - 10), 8);
 	seq_write(m, " kB\n", 4);
+}
+
+static void show_val(struct seq_file *m, const char *s, unsigned long num)
+{
+	seq_put_decimal_ull_width(m, s, num << (PAGE_SHIFT - 10), 8);
+	seq_write(m, "\n", 1);
 }
 
 static int meminfo_proc_show(struct seq_file *m, void *v)
@@ -55,6 +64,7 @@ static int meminfo_proc_show(struct seq_file *m, void *v)
 	sreclaimable = global_node_page_state_pages(NR_SLAB_RECLAIMABLE_B);
 	sunreclaim = global_node_page_state_pages(NR_SLAB_UNRECLAIMABLE_B);
 
+	show_val(m, "TdpCount:       ", tdp_count);
 	show_val_kb(m, "MemTotal:       ", i.totalram);
 	show_val_kb(m, "MemFree:        ", i.freeram);
 	show_val_kb(m, "MemAvailable:   ", available);

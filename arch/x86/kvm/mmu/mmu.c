@@ -56,6 +56,7 @@
 #include "paging.h"
 
 extern bool itlb_multihit_kvm_mitigation;
+extern u64 tdp_count;
 
 int __read_mostly nx_huge_pages = -1;
 #ifdef CONFIG_PREEMPT_RT
@@ -3946,10 +3947,42 @@ int kvm_handle_page_fault(struct kvm_vcpu *vcpu, u64 error_code,
 }
 EXPORT_SYMBOL_GPL(kvm_handle_page_fault);
 
+int kvm_prealloc_user_memory_region(
+	struct kvm *kvm, const struct kvm_userspace_prealloc_memory_region *mem)
+{
+	struct kvm_vcpu *vcpu;
+	gpa_t gpa;
+	u32 error_code;
+	u64 pages;
+	int ret, i;
+
+	vcpu = kvm_get_vcpu(kvm, 0);
+	gpa = mem->guest_phys_addr;
+	pages = mem->memory_size >> PAGE_SHIFT;
+	error_code = PFERR_WRITE_MASK;
+
+	pr_info("kvm_prealloc_user_memory_region: vcpu=0x%llx gpa=%llu, pages=%llu\n",
+		(u64)vcpu, gpa, pages);
+
+	if (gpa == 0)
+		return 0;
+
+	for (i = 0; i < pages; i++) {
+		ret = kvm_tdp_page_fault(vcpu, gpa, error_code, false);
+		if (ret < 0)
+			return ret;
+		gpa += PAGE_SIZE;
+	}
+
+	return 0;
+}
+
 int kvm_tdp_page_fault(struct kvm_vcpu *vcpu, gpa_t gpa, u32 error_code,
 		       bool prefault)
 {
 	int max_level;
+
+	tdp_count++;
 
 	for (max_level = KVM_MAX_HUGEPAGE_LEVEL;
 	     max_level > PG_LEVEL_4K;

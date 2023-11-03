@@ -777,6 +777,8 @@ enum kvm_mr_change {
 	KVM_MR_FLAGS_ONLY,
 };
 
+int kvm_prealloc_user_memory_region(struct kvm *kvm, const struct kvm_userspace_prealloc_memory_region *mem);
+
 int kvm_set_memory_region(struct kvm *kvm,
 			  const struct kvm_userspace_memory_region *mem);
 int __kvm_set_memory_region(struct kvm *kvm,
