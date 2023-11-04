@@ -416,7 +416,6 @@ static unsigned int update_balloon_stats(struct virtio_balloon *vb)
 static void stats_request(struct virtqueue *vq)
 {
 	struct virtio_balloon *vb = vq->vdev->priv;
-	printk("stats_request\n");
 
 	spin_lock(&vb->stop_update_lock);
 	if (!vb->stop_update)
@@ -429,7 +428,6 @@ static void stats_handle_request(struct virtio_balloon *vb)
 	struct virtqueue *vq;
 	struct scatterlist sg;
 	unsigned int len, num_stats;
-	printk("stats_handle_request\n");
 
 	num_stats = update_balloon_stats(vb);
 
@@ -511,7 +509,6 @@ static void virtballoon_changed(struct virtio_device *vdev)
 {
 	struct virtio_balloon *vb = vdev->priv;
 	unsigned long flags;
-	printk("virtballoon_changed\n");
 
 	spin_lock_irqsave(&vb->stop_update_lock, flags);
 	if (!vb->stop_update) {
@@ -537,7 +534,6 @@ static void update_balloon_size(struct virtio_balloon *vb)
 static void update_balloon_stats_func(struct work_struct *work)
 {
 	struct virtio_balloon *vb;
-	printk("update_balloon_stats_func\n");
 
 	vb = container_of(work, struct virtio_balloon,
 			  update_balloon_stats_work);
@@ -551,7 +547,6 @@ static void update_balloon_size_func(struct work_struct *work)
 {
 	struct virtio_balloon *vb;
 	s64 diff;
-	printk("update_balloon_size_func\n");
 
 	vb = container_of(work, struct virtio_balloon,
 			  update_balloon_size_work);
@@ -798,7 +793,6 @@ static void report_free_page_func(struct work_struct *work)
 	struct virtio_balloon *vb = container_of(work, struct virtio_balloon,
 						 report_free_page_work);
 	u32 cmd_id_received;
-	printk("report_free_page_func\n");
 
 	cmd_id_received = virtio_balloon_cmd_id_received(vb);
 	if (cmd_id_received == VIRTIO_BALLOON_CMD_ID_DONE) {
@@ -1096,7 +1090,6 @@ static int virtballoon_probe(struct virtio_device *vdev)
 	}
 
 	virtio_device_ready(vdev);
-	printk("virtballoon_probe\n");
 	if (towards_target(vb))
 		virtballoon_changed(vdev);
 	return 0;
@@ -1189,7 +1182,6 @@ static int virtballoon_restore(struct virtio_device *vdev)
 {
 	struct virtio_balloon *vb = vdev->priv;
 	int ret;
-	printk("virtballoon_restore\n");
 	ret = init_vqs(vdev->priv);
 	if (ret)
 		return ret;
