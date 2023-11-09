@@ -56,6 +56,8 @@
 	(1 << (VIRTIO_BALLOON_HINT_BLOCK_ORDER + PAGE_SHIFT))
 #define VIRTIO_BALLOON_HINT_BLOCK_PAGES (1 << VIRTIO_BALLOON_HINT_BLOCK_ORDER)
 
+#define ENABLE_BALLOON_STATS_TIMER 1
+
 #ifdef CONFIG_BALLOON_COMPACTION
 static struct vfsmount *balloon_mnt;
 #endif
@@ -238,8 +240,14 @@ static unsigned fill_balloon(struct virtio_balloon *vb, size_t num)
 	unsigned num_allocated_pages;
 	unsigned num_pfns;
 	struct page *page;
+#ifdef ENABLE_BALLOON_STATS_TIMER
+	ktime_t start_time;
+#endif
 	/// 申请的扩展到balloon的物理页page的组成的链表
 	LIST_HEAD(pages);
+#ifdef ENABLE_BALLOON_STATS_TIMER
+	start_time = ktime_get();
+#endif
 
 	/* We can only do one array worth at a time. */
 	/// vb->pfns是记录本次扩缩操作那些物理页将被扩展到气球当中，数值即pfn，此数组的最大值是 VIRTIO_BALLOON_ARRAY_PFNS_MAX = 256
@@ -288,12 +296,18 @@ static unsigned fill_balloon(struct virtio_balloon *vb, size_t num)
 	}
 	/// 用于返回，实际扩展了多少page
 	num_allocated_pages = vb->num_pfns;
+#ifdef ENABLE_BALLOON_STATS_TIMER
+	pr_info("fill_balloon uses %lld us\n", ktime_to_us(ktime_sub(ktime_get(), start_time)));
+	start_time = ktime_get();
+#endif
 	/* Did we get any? */
 	/// 通知hypervisor的后端驱动，回收我们收集到气球中的页面
 	if (vb->num_pfns != 0)
 		tell_host(vb, vb->inflate_vq);
 	mutex_unlock(&vb->balloon_lock);
-
+#ifdef ENABLE_BALLOON_STATS_TIMER
+	pr_info("fill_tell_host uses %lld us\n", ktime_to_us(ktime_sub(ktime_get(), start_time)));
+#endif
 	return num_allocated_pages;
 }
 
@@ -318,8 +332,15 @@ static unsigned leak_balloon(struct virtio_balloon *vb, size_t num)
 {
 	unsigned num_freed_pages;
 	struct page *page;
+#ifdef ENABLE_BALLOON_STATS_TIMER
+	ktime_t start_time;
+	int used_time;
+#endif
 	struct balloon_dev_info *vb_dev_info = &vb->vb_dev_info;
 	LIST_HEAD(pages);
+#ifdef ENABLE_BALLOON_STATS_TIMER
+	start_time = ktime_get();
+#endif
 
 	/* We can only do one array worth at a time. */
 	num = min(num, ARRAY_SIZE(vb->pfns));
@@ -340,6 +361,10 @@ static unsigned leak_balloon(struct virtio_balloon *vb, size_t num)
 	}
 
 	num_freed_pages = vb->num_pfns;
+#ifdef ENABLE_BALLOON_STATS_TIMER
+	used_time = ktime_to_us(ktime_sub(ktime_get(), start_time));
+	start_time = ktime_get();
+#endif
 	/*
 	 * Note that if
 	 * virtio_has_feature(vdev, VIRTIO_BALLOON_F_MUST_TELL_HOST);
@@ -348,9 +373,17 @@ static unsigned leak_balloon(struct virtio_balloon *vb, size_t num)
 	/// 通知hypervisor重新建立映射
 	if (vb->num_pfns != 0)
 		tell_host(vb, vb->deflate_vq);
+#ifdef ENABLE_BALLOON_STATS_TIMER
+	pr_info("leak_tell_host uses %lld us\n",  ktime_to_us(ktime_sub(ktime_get(), start_time)));
+	start_time = ktime_get();
+#endif
 	/// 回收页面给伙伴系统，同时增加 _totalram_pages，对应fill-balloon减小_totalram_pages的操作
 	release_pages_balloon(vb, &pages);
 	mutex_unlock(&vb->balloon_lock);
+#ifdef ENABLE_BALLOON_STATS_TIMER
+	used_time += ktime_to_us(ktime_sub(ktime_get(), start_time));
+	pr_info("leak_balloon uses %u us\n", used_time);
+#endif
 	return num_freed_pages;
 }
 
